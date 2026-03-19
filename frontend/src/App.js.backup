@@ -1,0 +1,1757 @@
+import React, { useState, useEffect, useRef } from 'react';
+import './App.css';
+
+const App = () => {
+  // ========== PAGE STATE ==========
+  const [currentPage, setCurrentPage] = useState('auth'); // 'auth' | 'chat' | 'itinerary' | 'saved'
+
+  // ========== AUTH STATE ==========
+  const [user, setUser] = useState(null);
+  const [loginTab, setLoginTab] = useState('login');
+  const [authForm, setAuthForm] = useState({ name: '', email: '', password: '', confirm: '' });
+  const [authError, setAuthError] = useState('');
+
+  // ========== CHAT STATE ==========
+  const [chatData, setChatData] = useState({
+    origin: '', destination: '', originLat: null, originLng: null,
+    destLat: null, destLng: null, days: null,
+    vibes: [], group_type: '', budget_level: '', special_requests: ''
+  });
+  const [chatHistory, setChatHistory] = useState([]);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+  const [autocompleteResults, setAutocompleteResults] = useState([]);
+  const [autocompleteType, setAutocompleteType] = useState(null);
+  const [selectedCustomDays, setSelectedCustomDays] = useState('');
+
+  // ========== ITINERARY STATE ==========
+  const [itinerary, setItinerary] = useState(null);
+  const [weather, setWeather] = useState(null);
+  const [savedTrips, setSavedTrips] = useState([]);
+  const [activeCurrency, setActiveCurrency] = useState('USD');
+  const [activePace, setActivePace] = useState('balanced');
+  const [activeTab, setActiveTab] = useState('itinerary');
+  const [activeDay, setActiveDay] = useState(1);
+  const [activeStop, setActiveStop] = useState(null);
+  const [drawer, setDrawer] = useState(null);
+  const [transportModes, setTransportModes] = useState({});
+  const [completedStops, setCompletedStops] = useState(new Set());
+
+  // ========== UI STATE ==========
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('');
+  const [error, setError] = useState(null);
+  const [showNewTripConfirm, setShowNewTripConfirm] = useState(false);
+
+  // ========== REFS ==========
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+  const polylineRef = useRef(null);
+  const chatEndRef = useRef(null);
+  const autocompleteTimeoutRef = useRef(null);
+
+  // ========== CONSTANTS ==========
+  const dayColors = ['#6366F1', '#0EA5E9', '#10B981', '#F59E0B', '#F43F5E', '#8B5CF6', '#EC4899'];
+  const exchangeRates = {
+    USD: 1, INR: 83.5, EUR: 0.92, GBP: 0.79,
+    AED: 3.67, SGD: 1.34, JPY: 149.5, THB: 35.2
+  };
+  const currencySymbols = {
+    USD: '$', INR: '₹', EUR: '€', GBP: '£',
+    AED: 'د.إ', SGD: 'S$', JPY: '¥', THB: '฿'
+  };
+
+  const categoryGradients = {
+    Nature: 'linear-gradient(135deg, #10B981, #059669)',
+    Culture: 'linear-gradient(135deg, #6366F1, #4F46E5)',
+    Food: 'linear-gradient(135deg, #F59E0B, #D97706)',
+    Shopping: 'linear-gradient(135deg, #EC4899, #DB2777)',
+    Nightlife: 'linear-gradient(135deg, #8B5CF6, #7C3AED)',
+    Adventure: 'linear-gradient(135deg, #0EA5E9, #0284C7)',
+  };
+
+  const categoryEmojis = {
+    Nature: '🌿',
+    Culture: '🏛',
+    Food: '🍜',
+    Shopping: '🛍',
+    Nightlife: '🎉',
+    Adventure: '🧗',
+  };
+
+  const weatherCodeMap = {
+    0: { label: 'Clear sky', emoji: '☀️', type: 'clear' },
+    1: { label: 'Clear sky', emoji: '☀️', type: 'clear' },
+    2: { label: 'Partly cloudy', emoji: '⛅', type: 'cloudy' },
+    3: { label: 'Partly cloudy', emoji: '⛅', type: 'cloudy' },
+    45: { label: 'Foggy', emoji: '🌫️', type: 'cloudy' },
+    51: { label: 'Rainy', emoji: '🌧️', type: 'rain' },
+    67: { label: 'Rainy', emoji: '🌧️', type: 'rain' },
+    71: { label: 'Snowy', emoji: '❄️', type: 'snow' },
+    77: { label: 'Snowy', emoji: '❄️', type: 'snow' },
+    80: { label: 'Stormy', emoji: '⛈️', type: 'storm' },
+    95: { label: 'Stormy', emoji: '⛈️', type: 'storm' },
+  };
+
+  // ========== INITIALIZATION ==========
+  useEffect(() => {
+    const saved = localStorage.getItem('travelUser');
+    if (saved) {
+      const parsedUser = JSON.parse(saved);
+      setUser(parsedUser);
+      setCurrentPage('chat');
+    }
+  }, []);
+
+  // ========== AUTO-SCROLL CHAT ==========
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
+
+  // ========== CONVERT PRICE ==========
+  const convertPrice = (usd, currency) => {
+    if (!usd) return 0;
+    return Math.round(usd * exchangeRates[currency]);
+  };
+
+  // ========== SEARCH PLACES ==========
+  const searchPlaces = async (query) => {
+    if (query.length < 3) {
+      setAutocompleteResults([]);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`,
+        { headers: { 'Accept-Language': 'en' } }
+      );
+      const data = await res.json();
+      const results = data.map(p => ({
+        label: p.display_name.split(',').slice(0, 3).join(','),
+        lat: parseFloat(p.lat),
+        lng: parseFloat(p.lon),
+        city: p.address?.city || p.address?.town || p.address?.village || query,
+        country: p.address?.country
+      }));
+      setAutocompleteResults(results);
+    } catch (err) {
+      console.error('Autocomplete error:', err);
+    }
+  };
+
+  // ========== DEBOUNCED AUTOCOMPLETE ==========
+  const handleAutocompleteChange = (e, type) => {
+    const value = e.target.value;
+    if (type === 'origin') {
+      setChatData(prev => ({ ...prev, origin: value }));
+    } else {
+      setChatData(prev => ({ ...prev, destination: value }));
+    }
+    setAutocompleteType(type);
+
+    clearTimeout(autocompleteTimeoutRef.current);
+    autocompleteTimeoutRef.current = setTimeout(() => {
+      searchPlaces(value);
+    }, 350);
+  };
+
+  // ========== SELECT PLACE ==========
+  const selectPlace = (place, type) => {
+    if (type === 'origin') {
+      setChatData(prev => ({
+        ...prev,
+        origin: place.city,
+        originLat: place.lat,
+        originLng: place.lng
+      }));
+    } else {
+      setChatData(prev => ({
+        ...prev,
+        destination: place.city,
+        destLat: place.lat,
+        destLng: place.lng
+      }));
+    }
+    setAutocompleteResults([]);
+  };
+
+  // ========== HANDLE CHAT ANSWER ==========
+  const handleChatAnswer = (value) => {
+    const questions = [
+      'origin',
+      'destination',
+      'days',
+      'vibes',
+      'group_type',
+      'budget_level',
+      'special_requests'
+    ];
+
+    if (currentQuestion < questions.length) {
+      const field = questions[currentQuestion];
+
+      if (currentQuestion === 2) {
+        setChatData(prev => ({ ...prev, days: parseInt(value) || null }));
+      } else if (currentQuestion === 3) {
+        setChatData(prev => ({ ...prev, vibes: Array.isArray(value) ? value : [] }));
+      } else {
+        setChatData(prev => ({ ...prev, [field]: value }));
+      }
+
+      setChatHistory(prev => [...prev, { role: 'user', text: value }]);
+      setCurrentQuestion(prev => prev + 1);
+
+      setTimeout(() => {
+        if (currentQuestion + 1 < questions.length) {
+          getNextQuestion(currentQuestion + 1);
+        }
+      }, 400);
+    }
+  };
+
+  // ========== GET NEXT QUESTION ==========
+  const getNextQuestion = (qIndex) => {
+    const questions = [
+      {
+        role: 'bot',
+        text: `Hey ${user?.name || 'traveler'}! Where are you starting your journey from?`,
+        type: 'location'
+      },
+      {
+        role: 'bot',
+        text: 'Amazing! And where\'s the dream destination?',
+        type: 'location'
+      },
+      {
+        role: 'bot',
+        text: 'How many days are you thinking?',
+        type: 'days'
+      },
+      {
+        role: 'bot',
+        text: 'What\'s your travel vibe?',
+        type: 'vibes'
+      },
+      {
+        role: 'bot',
+        text: 'Who\'s joining you?',
+        type: 'group'
+      },
+      {
+        role: 'bot',
+        text: 'What\'s your daily budget per person?',
+        type: 'budget'
+      },
+      {
+        role: 'bot',
+        text: 'Any special requests or things to avoid?',
+        type: 'requests'
+      },
+      {
+        role: 'bot',
+        text: 'Perfect! Let me craft your ideal itinerary ✈️',
+        type: 'cta'
+      }
+    ];
+
+    if (qIndex < questions.length) {
+      setChatHistory(prev => [...prev, questions[qIndex]]);
+    }
+  };
+
+  // ========== FETCH ITINERARY ==========
+  const fetchItinerary = async () => {
+    setLoading(true);
+    setError(null);
+
+    const loadingMessages = [
+      'Talking to your AI travel agents...',
+      'Scouting the best spots in ' + chatData.destination + '...',
+      'Checking local weather and conditions...',
+      'Finding restaurants matching your vibe...',
+      'Comparing hotels within your budget...',
+      'Optimizing your route for minimal travel time...',
+      'Almost ready — finalizing your perfect itinerary...'
+    ];
+
+    let msgIndex = 0;
+    const msgInterval = setInterval(() => {
+      setLoadingMsg(loadingMessages[msgIndex % loadingMessages.length]);
+      msgIndex++;
+    }, 1500);
+
+    try {
+      const res = await fetch('http://localhost:8000/api/plan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user?.token}`
+        },
+        body: JSON.stringify({
+          origin: chatData.origin,
+          destination: chatData.destination,
+          origin_lat: chatData.originLat,
+          origin_lng: chatData.originLng,
+          dest_lat: chatData.destLat,
+          dest_lng: chatData.destLng,
+          days: chatData.days,
+          vibes: chatData.vibes,
+          group_type: chatData.group_type,
+          budget_level: chatData.budget_level,
+          special_requests: chatData.special_requests
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`${res.status}`);
+      }
+
+      const data = await res.json();
+      const trip = data.trip;
+
+      // Enforce max 4 stops per day
+      trip.days = trip.days.map(day => ({
+        ...day,
+        stops: day.stops.slice(0, 4)
+      }));
+
+      setItinerary(trip);
+      fetchWeather(trip.center_lat, trip.center_lng);
+      setCurrentPage('itinerary');
+      setActiveDay(1);
+      setCompletedStops(new Set());
+
+    } catch (err) {
+      console.error('Fetch error:', err);
+      setError(`Couldn't build your itinerary — try again in a moment`);
+    } finally {
+      clearInterval(msgInterval);
+      setLoading(false);
+    }
+  };
+
+  // ========== FETCH WEATHER ==========
+  const fetchWeather = async (lat, lng) => {
+    try {
+      const res = await fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
+        `&daily=weathercode,temperature_2m_max,precipitation_probability_max` +
+        `&current_weather=true&timezone=auto&forecast_days=7`
+      );
+      const data = await res.json();
+      setWeather(data);
+    } catch (err) {
+      console.error('Weather fetch error:', err);
+    }
+  };
+
+  // ========== INIT MAP ==========
+  useEffect(() => {
+    if (currentPage === 'itinerary' && mapRef.current && !mapInstanceRef.current) {
+      // Load Leaflet dynamically
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js';
+      script.async = true;
+      script.onload = () => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css';
+        document.head.appendChild(link);
+
+        if (window.L && itinerary) {
+          const map = window.L.map(mapRef.current).setView(
+            [itinerary.center_lat, itinerary.center_lng],
+            12
+          );
+
+          window.L.tileLayer(
+            'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+            {
+              attribution: '&copy; CartoDB',
+              maxZoom: 19
+            }
+          ).addTo(map);
+
+          mapInstanceRef.current = map;
+          renderMapDay();
+        }
+      };
+      document.head.appendChild(script);
+    }
+  }, [currentPage, itinerary]);
+
+  // ========== RENDER MAP FOR ACTIVE DAY ==========
+  const renderMapDay = () => {
+    if (!mapInstanceRef.current || !itinerary) return;
+
+    const map = mapInstanceRef.current;
+
+    // Clear markers
+    markersRef.current.forEach(m => map.removeLayer(m));
+    markersRef.current = [];
+
+    if (polylineRef.current) {
+      map.removeLayer(polylineRef.current);
+      polylineRef.current = null;
+    }
+
+    const dayData = itinerary.days[activeDay - 1];
+    if (!dayData || !dayData.stops.length) return;
+
+    // Add stop markers
+    dayData.stops.forEach((stop, idx) => {
+      const color = dayColors[activeDay - 1];
+      const html = `<div style="width:32px;height:32px;border-radius:50%;background:${color};border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:600;color:white;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.4);cursor:pointer">${idx + 1}</div>`;
+
+      const marker = window.L.marker([stop.lat, stop.lng], {
+        icon: window.L.divIcon({
+          html,
+          className: '',
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        })
+      }).addTo(map);
+
+      marker.on('click', () => {
+        setActiveStop(stop);
+        setDrawer(stop);
+      });
+
+      markersRef.current.push(marker);
+    });
+
+    // Draw polyline
+    const latlngs = dayData.stops.map(s => [s.lat, s.lng]);
+    polylineRef.current = window.L.polyline(latlngs, {
+      color: dayColors[activeDay - 1],
+      weight: 4,
+      opacity: 0.8
+    }).addTo(map);
+
+    // Fit bounds
+    map.fitBounds(window.L.latLngBounds(latlngs), { padding: [50, 50] });
+  };
+
+  useEffect(() => {
+    renderMapDay();
+  }, [activeDay, itinerary]);
+
+  // ========== AUTH HANDLERS ==========
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+
+    try {
+      const endpoint = loginTab === 'login' ? '/api/auth/login' : '/api/auth/register';
+      const body = loginTab === 'login'
+        ? { email: authForm.email, password: authForm.password }
+        : { name: authForm.name, email: authForm.email, password: authForm.password };
+
+      const res = await fetch(`http://localhost:8000${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail || 'Auth failed');
+      }
+
+      const data = await res.json();
+      const sessionData = {
+        userId: data.user_id || data.userId,
+        token: data.access_token || data.token,
+        name: data.name,
+        isGuest: false
+      };
+
+      localStorage.setItem('travelUser', JSON.stringify(sessionData));
+      setUser(sessionData);
+      setCurrentPage('chat');
+      setChatHistory([]);
+      setCurrentQuestion(0);
+
+      setTimeout(() => {
+        getNextQuestion(0);
+      }, 300);
+
+    } catch (err) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleGuestLogin = () => {
+    const sessionData = {
+      userId: 'guest_' + Date.now(),
+      token: 'guest_token',
+      name: 'Guest',
+      isGuest: true
+    };
+    localStorage.setItem('travelUser', JSON.stringify(sessionData));
+    setUser(sessionData);
+    setCurrentPage('chat');
+    setChatHistory([]);
+    setCurrentQuestion(0);
+
+    setTimeout(() => {
+      getNextQuestion(0);
+    }, 300);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('travelUser');
+    setUser(null);
+    setCurrentPage('auth');
+    startNewTrip();
+  };
+
+  // ========== START NEW TRIP ==========
+  const startNewTrip = () => {
+    setChatData({
+      origin: '', destination: '', originLat: null, originLng: null,
+      destLat: null, destLng: null, days: null,
+      vibes: [], group_type: '', budget_level: '', special_requests: ''
+    });
+    setChatHistory([]);
+    setCurrentQuestion(0);
+    setItinerary(null);
+    setWeather(null);
+    setSuggestions([]);
+    setActivePace('balanced');
+    setActiveTab('itinerary');
+    setActiveDay(1);
+    setActiveStop(null);
+    setDrawer(null);
+    setError(null);
+    setTransportModes({});
+    setCompletedStops(new Set());
+    setShowNewTripConfirm(false);
+    setCurrentPage('chat');
+  };
+
+  // ========== RENDER FUNCTIONS ==========
+  const renderAuthPage = () => {
+const LEAFLET_CSS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css";
+const LEAFLET_JS = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
+
+const STATUS_MESSAGES = [
+  "Talking to your AI travel agents...",
+  "Scouting the best spots in your destination...",
+  "Checking local weather and conditions...",
+  "Finding restaurants for your vibe...",
+  "Comparing hotels within your budget...",
+  "Optimizing your route for minimal travel time...",
+  "Almost ready - finalizing your perfect itinerary...",
+];
+
+const weatherCodeMap = {
+  0: { label: "Clear sky", emoji: "☀️", tone: "#10B981", badge: "Perfect today" },
+  1: { label: "Mainly clear", emoji: "🌤️", tone: "#10B981", badge: "Perfect today" },
+  2: { label: "Partly cloudy", emoji: "⛅", tone: "#10B981", badge: "Perfect today" },
+  3: { label: "Overcast", emoji: "⛅", tone: "#94A3B8", badge: "Good to go" },
+  45: { label: "Foggy", emoji: "🌫️", tone: "#94A3B8", badge: "Good to go" },
+  51: { label: "Light drizzle", emoji: "🌧️", tone: "#F59E0B", badge: "Carry umbrella" },
+  61: { label: "Slight rain", emoji: "🌧️", tone: "#F59E0B", badge: "Carry umbrella" },
+  63: { label: "Moderate rain", emoji: "🌧️", tone: "#F59E0B", badge: "Carry umbrella" },
+  67: { label: "Heavy rain", emoji: "🌧️", tone: "#F59E0B", badge: "Carry umbrella" },
+  71: { label: "Slight snow", emoji: "❄️", tone: "#0EA5E9", badge: "Dress warm" },
+  77: { label: "Snow grains", emoji: "❄️", tone: "#0EA5E9", badge: "Dress warm" },
+  80: { label: "Rain showers", emoji: "⛈️", tone: "#EF4444", badge: "Check before going" },
+  95: { label: "Thunderstorm", emoji: "⛈️", tone: "#EF4444", badge: "Check before going" },
+};
+
+const packingRules = {
+  always: ["Passport", "Travel insurance docs", "Phone charger", "Earphones"],
+  weather_hot: ["Sunscreen SPF 50+", "Sunglasses", "Light cotton clothes"],
+  weather_cold: ["Warm jacket", "Thermal innerwear", "Waterproof boots"],
+  weather_rain: ["Compact umbrella", "Waterproof bag cover", "Quick-dry clothes"],
+  vibe_Nature: ["Trekking shoes", "Insect repellent", "Reusable water bottle"],
+  vibe_Culture: ["Modest clothing", "Comfortable walking shoes", "Camera"],
+  vibe_Food: ["Antacids", "Food diary/app", "Loose pants"],
+  vibe_Nightlife: ["Smart casual outfit", "ID proof", "Portable charger"],
+  group_Family: ["First aid kit", "Kids snacks", "Wet wipes"],
+  group_Solo: ["Padlock for hostel", "Emergency cash", "Offline maps downloaded"],
+};
+
+const paceMultiplier = { relaxed: 1.5, balanced: 1.0, fastpaced: 0.7 };
+const dayColors = ["#6366F1", "#0EA5E9", "#10B981", "#F59E0B", "#EC4899"];
+
+function apiUrl(path) {
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function initials(name) {
+  return String(name || "T")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0].toUpperCase())
+    .join("") || "T";
+}
+
+function loadStyle(href) {
+  if (document.querySelector(`link[href='${href}']`)) return;
+  const l = document.createElement("link");
+  l.rel = "stylesheet";
+  l.href = href;
+  document.head.appendChild(l);
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src='${src}']`)) {
+      resolve();
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.body.appendChild(s);
+  });
+}
+
+function parseTime(t) {
+  if (!t) return null;
+  const m = String(t).match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2]);
+  const ap = m[3].toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function toClock(mins) {
+  const m = ((mins % 1440) + 1440) % 1440;
+  const h24 = Math.floor(m / 60);
+  const mm = m % 60;
+  const ap = h24 >= 12 ? "PM" : "AM";
+  const h12 = h24 % 12 || 12;
+  return `${h12}:${String(mm).padStart(2, "0")} ${ap}`;
+}
+
+function weatherInfoFromCode(code) {
+  return weatherCodeMap[code] || { label: "Unknown", emoji: "🌡️", tone: "#94A3B8", badge: "Check conditions" };
+}
+
+function bestTimeHint(dayCode, maxTemp, rainProb) {
+  if (rainProb > 60) return "Consider visiting this in the afternoon.";
+  if (maxTemp > 35) return "Early morning visit recommended.";
+  if ([0, 1, 2].includes(dayCode)) return "Stay for sunset - conditions are perfect.";
+  return "Check local conditions before departure.";
+}
+
+function isIndoorStop(stop) {
+  const text = `${stop?.name || ""} ${stop?.category || ""}`.toLowerCase();
+  if (stop?.indoor === true) return true;
+  return /(museum|temple|church|fort|mall|gallery|indoor|culture|mosque|palace)/.test(text);
+}
+
+function derivePackingList(itinerary, weatherData) {
+  const set = new Set(packingRules.always);
+  if (!itinerary) return Array.from(set);
+
+  const maxTemp = Math.max(...(weatherData?.daily?.temperature_2m_max || [24]));
+  const minTemp = Math.min(...(weatherData?.daily?.temperature_2m_min || [18]));
+  const rain = Math.max(...(weatherData?.daily?.precipitation_probability_max || [0]));
+
+  if (maxTemp > 30) packingRules.weather_hot.forEach((i) => set.add(i));
+  if (minTemp < 10) packingRules.weather_cold.forEach((i) => set.add(i));
+  if (rain > 60) packingRules.weather_rain.forEach((i) => set.add(i));
+
+  (itinerary.vibes || []).forEach((v) => {
+    const key = `vibe_${v}`;
+    (packingRules[key] || []).forEach((i) => set.add(i));
+  });
+  (packingRules[`group_${itinerary.group_type}`] || []).forEach((i) => set.add(i));
+
+  if ((itinerary.duration_days || 1) > 5) {
+    set.add("Laundry pods / travel detergent");
+    set.add("Extra power bank");
+  }
+
+  return Array.from(set);
+}
+
+async function searchPlaces(query) {
+  if (query.length < 3) return [];
+  const res = await fetch(
+    `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`,
+    { headers: { "Accept-Language": "en" } }
+  );
+  const data = await res.json();
+  return data.map((p) => ({
+    label: p.display_name.split(",").slice(0, 3).join(","),
+    lat: Number(p.lat),
+    lng: Number(p.lon),
+    city: p.address?.city || p.address?.town || p.address?.village || query,
+    country: p.address?.country,
+  }));
+}
+
+async function reverseGeocode(lat, lng) {
+  const res = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10&addressdetails=1`,
+    { headers: { "Accept-Language": "en" } }
+  );
+  if (!res.ok) throw new Error("Reverse geocode failed");
+  const p = await res.json();
+  return {
+    label: p.display_name?.split(",").slice(0, 3).join(",") || "Current location",
+    lat,
+    lng,
+    city: p.address?.city || p.address?.town || p.address?.village || "Current location",
+    country: p.address?.country,
+  };
+}
+
+async function fetchWeather(lat, lng) {
+  const res = await fetch(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=weathercode,temperature_2m_max,precipitation_probability_max&current_weather=true&timezone=auto&forecast_days=7`
+  );
+  if (!res.ok) throw new Error("Weather unavailable");
+  return res.json();
+}
+
+async function fetchItinerary(chatData, userToken) {
+  const response = await fetch(apiUrl("/api/plan"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${userToken}`,
+    },
+    body: JSON.stringify({
+      origin: chatData.origin,
+      destination: chatData.destination,
+      days: chatData.days,
+      vibes: chatData.vibes,
+      group_type: chatData.group_type,
+      budget_level: chatData.budget_level,
+      special_requests: chatData.special_requests,
+    }),
+  });
+  if (!response.ok) {
+    const error = new Error(`API error: ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+function mapErrorToMessage(err) {
+  const status = err?.status;
+  if (status === 401) return "Session expired - please log in again.";
+  if (status === 422) return "We couldn't understand the destination - try being more specific.";
+  if (status === 500) return "Our travel agents are busy - try again in a moment.";
+  if (String(err?.message || "").toLowerCase().includes("network")) return "No internet connection detected.";
+  return "Something went wrong while building your itinerary.";
+}
+
+export default function App() {
+  const [currentPage, setCurrentPage] = useState("auth"); // auth | chat | itinerary | trips | dashboard
+  const [user, setUser] = useState(null);
+
+  const [chatData, setChatData] = useState({
+    origin: "",
+    destination: "",
+    days: null,
+    vibes: [],
+    group_type: "",
+    budget_level: "",
+    special_requests: "",
+    originGeo: null,
+    destinationGeo: null,
+  });
+
+  const [itinerary, setItinerary] = useState(null);
+  const [savedTrips, setSavedTrips] = useState([]);
+  const [weather, setWeather] = useState(null);
+  const [errorState, setErrorState] = useState(null);
+
+  const [authTab, setAuthTab] = useState("login");
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "", confirmPassword: "" });
+  const [authError, setAuthError] = useState("");
+
+  const [chatHistory, setChatHistory] = useState([]);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+  const [typing, setTyping] = useState(false);
+  const [textInput, setTextInput] = useState("");
+  const [readyToBuild, setReadyToBuild] = useState(false);
+
+  const [suggestions, setSuggestions] = useState([]);
+  const [hoveredSuggestion, setHoveredSuggestion] = useState(-1);
+  const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
+  const [suggestionLoading, setSuggestionLoading] = useState(false);
+  const [inputFlash, setInputFlash] = useState(false);
+
+  const [loadingState, setLoadingState] = useState(false);
+  const [loadingStatusIndex, setLoadingStatusIndex] = useState(0);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+
+  const [activePace, setActivePace] = useState("balanced");
+  const [activeTab, setActiveTab] = useState("itinerary");
+  const [expandedDays, setExpandedDays] = useState({ 1: true });
+  const [activeStopKey, setActiveStopKey] = useState("");
+  const [checkedPacking, setCheckedPacking] = useState({});
+
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [pendingResetQuestion, setPendingResetQuestion] = useState(0);
+
+  const [mapReady, setMapReady] = useState(false);
+  const mapRef = useRef(null);
+  const mapContainerRef = useRef(null);
+  const markersRef = useRef({});
+  const stopRefs = useRef({});
+  const chatEndRef = useRef(null);
+
+  const questions = useMemo(
+    () => [
+      "Hey! Where are you starting your journey from?",
+      "Amazing! And where's the dream destination?",
+      "How many days are you thinking?",
+      "What's your travel vibe?",
+      "Who's joining you?",
+      "What's your daily budget per person?",
+      "Any special requests or things to avoid?",
+    ],
+    []
+  );
+
+  const progressPct = Math.round((currentQuestion / questions.length) * 100);
+
+  const itineraryDays = useMemo(() => itinerary?.days || [], [itinerary]);
+  const isRainBanner = Math.max(...(weather?.daily?.precipitation_probability_max || [0])) > 70;
+
+  const allStops = useMemo(() => {
+    const out = [];
+    itineraryDays.forEach((d, dayIdx) => {
+      const baseStops = d.stops || [];
+      let displayStops = baseStops;
+      if (activePace === "relaxed") {
+        displayStops = baseStops.slice(0, Math.max(1, Math.ceil(baseStops.length * 0.7)));
+      }
+      if (activePace === "fastpaced") {
+        displayStops = baseStops.filter((s) => String(s.category || "").toLowerCase() !== "food");
+      }
+
+      let runningTime = parseTime(displayStops[0]?.arrival_time) ?? 9 * 60;
+      displayStops.forEach((s, stopIdx) => {
+        const lat = Number(s?.lat);
+        const lng = Number(s?.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        const adjDuration = Math.max(20, Math.round((s.duration_minutes || 60) * paceMultiplier[activePace]));
+        const key = `d${d.day}-s${stopIdx}`;
+        const dayCode = weather?.daily?.weathercode?.[Math.max(0, (d.day || 1) - 1)];
+        const maxTemp = weather?.daily?.temperature_2m_max?.[Math.max(0, (d.day || 1) - 1)] ?? 25;
+        const rainProb = weather?.daily?.precipitation_probability_max?.[Math.max(0, (d.day || 1) - 1)] ?? 0;
+        out.push({
+          ...s,
+          lat,
+          lng,
+          key,
+          day: d.day,
+          dayTitle: d.title,
+          dayColor: dayColors[dayIdx % dayColors.length],
+          globalOrder: out.length + 1,
+          displayArrival: toClock(runningTime),
+          displayDuration: adjDuration,
+          weatherCode: dayCode,
+          weatherInfo: weatherInfoFromCode(dayCode),
+          weatherHint: bestTimeHint(dayCode, maxTemp, rainProb),
+          indoorTag: isRainBanner && isIndoorStop(s),
+        });
+        runningTime += adjDuration;
+      });
+    });
+    return out;
+  }, [itineraryDays, activePace, weather, isRainBanner]);
+
+  const weatherStrip = useMemo(() => {
+    if (!weather?.daily?.time) return [];
+    return weather.daily.time.map((dateStr, i) => {
+      const code = weather.daily.weathercode?.[i];
+      const w = weatherInfoFromCode(code);
+      return {
+        key: dateStr,
+        label: i === 0 ? "Today" : new Date(dateStr).toLocaleDateString(undefined, { weekday: "short" }),
+        emoji: w.emoji,
+        temp: Math.round(weather.daily.temperature_2m_max?.[i] ?? 0),
+      };
+    });
+  }, [weather]);
+
+  const packingList = useMemo(() => derivePackingList(itinerary, weather), [itinerary, weather]);
+
+  useEffect(() => {
+    document.body.style.margin = "0";
+    loadStyle(LEAFLET_CSS);
+    Promise.all([loadScript(LEAFLET_JS)])
+      .then(() => {
+        setMapReady(Boolean(window.L));
+      })
+      .catch(() => {
+        setMapReady(Boolean(window.L));
+      });
+
+    const savedUser = localStorage.getItem("travelUser");
+    const guest = sessionStorage.getItem("travelGuest");
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+      setCurrentPage("dashboard");
+    } else if (guest) {
+      setUser(JSON.parse(guest));
+      setCurrentPage("dashboard");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (currentPage !== "chat") return;
+    if (chatHistory.length > 0) return;
+    setChatHistory([{ sender: "bot", text: questions[currentQuestion] || questions[0] }]);
+  }, [currentPage, chatHistory.length, questions, currentQuestion]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chatHistory, typing]);
+
+  useEffect(() => {
+    if (!loadingState) return;
+    const statusTimer = window.setInterval(() => {
+      setLoadingStatusIndex((prev) => (prev + 1) % STATUS_MESSAGES.length);
+    }, 1500);
+    const progressTimer = window.setInterval(() => {
+      setLoadingProgress((prev) => Math.min(95, prev + 1));
+    }, 85);
+    return () => {
+      window.clearInterval(statusTimer);
+      window.clearInterval(progressTimer);
+    };
+  }, [loadingState]);
+
+  useEffect(() => {
+    const shouldSuggest = currentPage === "chat" && (currentQuestion === 0 || currentQuestion === 1) && textInput.trim().length >= 3;
+    if (!shouldSuggest) {
+      setSuggestions([]);
+      setSelectedSuggestion(-1);
+      setSuggestionLoading(false);
+      return;
+    }
+    const t = window.setTimeout(async () => {
+      setSuggestionLoading(true);
+      try {
+        const rows = await searchPlaces(textInput.trim());
+        setSuggestions(rows);
+        setSelectedSuggestion(rows.length ? 0 : -1);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setSuggestionLoading(false);
+      }
+    }, 350);
+    return () => window.clearTimeout(t);
+  }, [textInput, currentPage, currentQuestion]);
+
+  useEffect(() => {
+    if (currentPage !== "itinerary" || !mapReady || !mapContainerRef.current || allStops.length === 0) return;
+
+    let map = null;
+    let polyline = null;
+    try {
+      if (mapRef.current) {
+        try {
+          mapRef.current.remove();
+        } catch {
+          // ignore stale map teardown error
+        }
+        mapRef.current = null;
+      }
+      markersRef.current = {};
+
+      const L = window.L;
+      if (!L) return undefined;
+      map = L.map(mapContainerRef.current, { zoomControl: true, attributionControl: true });
+      mapRef.current = map;
+
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        maxZoom: 20,
+        attribution: "&copy; OpenStreetMap &copy; CARTO",
+      }).addTo(map);
+
+      const layer = L.layerGroup();
+      const bounds = [];
+      allStops.forEach((s) => {
+        if (!Number.isFinite(s.lat) || !Number.isFinite(s.lng)) return;
+        const markerHtml = `<div class='custom-marker' style='--mcolor:${s.dayColor}'>${s.globalOrder}</div>`;
+        const icon = L.divIcon({ className: "", html: markerHtml, iconSize: [32, 32], iconAnchor: [16, 16] });
+        const marker = L.marker([s.lat, s.lng], { icon });
+
+        const badge = s.weatherInfo;
+        const popup = `
+          <div style='min-width:230px'>
+            <div style='font-weight:700;margin-bottom:6px'>${s.name || "Stop"}</div>
+            <div style='font-size:12px;color:#475569;margin-bottom:8px'>${s.description || ""}</div>
+            <div style='font-size:12px;margin-bottom:4px'>⏱ ${Math.round(s.displayDuration || 0)} min • 💰 ${s.cost_usd ?? 0}</div>
+            <div style='font-size:12px;margin-bottom:4px'>🏷 ${s.category || "General"} • ${badge.emoji} ${badge.badge}</div>
+            <div style='font-size:11px;font-style:italic;margin-bottom:8px'>${s.pro_tip || ""}</div>
+            <a href='https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}' target='_blank' rel='noreferrer' style='display:inline-block;padding:6px 8px;background:#6366F1;color:white;border-radius:6px;text-decoration:none;font-size:12px'>📍 Get Directions</a>
+          </div>
+        `;
+        marker.bindPopup(popup);
+
+        marker.on("mouseover", () => setActiveStopKey(s.key));
+        marker.on("mouseout", () => setActiveStopKey(""));
+        marker.on("click", () => setActiveStopKey(s.key));
+
+        markersRef.current[s.key] = marker;
+        layer.addLayer(marker);
+        bounds.push([s.lat, s.lng]);
+      });
+
+      layer.addTo(map);
+      if (bounds.length) map.fitBounds(bounds, { padding: [42, 42] });
+      else map.setView([20, 0], 2);
+
+      polyline = L.polyline(
+        allStops
+          .filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng))
+          .map((s) => [s.lat, s.lng]),
+        {
+          color: "#818CF8",
+          weight: 4,
+          opacity: 0.9,
+          dashArray: "10 10",
+          className: "route-line",
+        }
+      ).addTo(map);
+    } catch {
+      setMapReady(false);
+    }
+
+    return () => {
+      try {
+        if (polyline) polyline.remove();
+      } catch {
+        // ignore
+      }
+      try {
+        if (map) map.remove();
+      } catch {
+        // ignore
+      }
+    };
+  }, [currentPage, mapReady, allStops]);
+
+  useEffect(() => {
+    Object.entries(markersRef.current).forEach(([key, marker]) => {
+      const el = marker.getElement()?.querySelector(".custom-marker");
+      if (!el) return;
+      if (activeStopKey === key) {
+        el.classList.add("ring");
+      } else {
+        el.classList.remove("ring");
+      }
+    });
+  }, [activeStopKey]);
+
+  const startNewTrip = (targetQuestion = 0, force = false) => {
+    if (itinerary && !force) {
+      setPendingResetQuestion(targetQuestion);
+      setResetModalOpen(true);
+      return;
+    }
+    setChatData({
+      origin: "",
+      destination: "",
+      days: null,
+      vibes: [],
+      group_type: "",
+      budget_level: "",
+      special_requests: "",
+      originGeo: null,
+      destinationGeo: null,
+    });
+    setChatHistory([]);
+    setCurrentQuestion(targetQuestion);
+    setItinerary(null);
+    setWeather(null);
+    setSuggestions([]);
+    setActivePace("balanced");
+    setActiveTab("itinerary");
+    setErrorState(null);
+    setTyping(false);
+    setReadyToBuild(false);
+    setTextInput("");
+    setCurrentPage("chat");
+  };
+
+  const confirmStartFresh = () => {
+    setResetModalOpen(false);
+    startNewTrip(pendingResetQuestion, true);
+  };
+
+  const submitAnswerText = () => {
+    if ((currentQuestion === 0 || currentQuestion === 1) && !textInput.trim()) return;
+
+    if (currentQuestion === 0) {
+      const value = textInput.trim();
+      setChatData((p) => ({ ...p, origin: value }));
+      setChatHistory((prev) => [...prev, { sender: "user", text: value }]);
+      goNextQuestion(1);
+      return;
+    }
+    if (currentQuestion === 1) {
+      const value = textInput.trim();
+      setChatData((p) => ({ ...p, destination: value }));
+      setChatHistory((prev) => [...prev, { sender: "user", text: value }]);
+      goNextQuestion(2);
+      return;
+    }
+    if (currentQuestion === 6) {
+      const value = textInput.trim() || "No special requests";
+      setChatData((p) => ({ ...p, special_requests: textInput.trim() }));
+      setChatHistory((prev) => [...prev, { sender: "user", text: value }]);
+      goNextQuestion(7);
+    }
+  };
+
+  const selectPlace = (s) => {
+    setTextInput(s.city);
+    setInputFlash(true);
+    setTimeout(() => setInputFlash(false), 350);
+    if (currentQuestion === 0) {
+      setChatData((p) => ({ ...p, origin: s.city, originGeo: { lat: s.lat, lng: s.lng, country: s.country } }));
+    }
+    if (currentQuestion === 1) {
+      setChatData((p) => ({ ...p, destination: s.city, destinationGeo: { lat: s.lat, lng: s.lng, country: s.country } }));
+    }
+    setSuggestions([]);
+    setSelectedSuggestion(-1);
+  };
+
+  const useCurrentLocation = () => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const place = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+          selectPlace(place);
+        } catch {
+          const fallback = {
+            city: "Current location",
+            label: "Detected from device GPS",
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            country: "",
+          };
+          selectPlace(fallback);
+        }
+      },
+      () => {
+        // ignore geolocation denial
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
+
+  const goNextQuestion = (q) => {
+    if (q >= questions.length) {
+      setTyping(true);
+      setTimeout(() => {
+        setTyping(false);
+        setChatHistory((prev) => [...prev, { sender: "bot", text: "Perfect! Let me craft your ideal itinerary ✈️" }]);
+        setReadyToBuild(true);
+      }, 400);
+      return;
+    }
+    setTyping(true);
+    setTimeout(() => {
+      setTyping(false);
+      setCurrentQuestion(q);
+      setChatHistory((prev) => [...prev, { sender: "bot", text: questions[q] }]);
+      setTextInput("");
+    }, 400);
+  };
+
+  const handleBuildTrip = async () => {
+    setErrorState(null);
+    setLoadingState(true);
+    setLoadingStatusIndex(0);
+    setLoadingProgress(0);
+
+    try {
+      const result = await fetchItinerary(chatData, user?.token || "");
+      setLoadingProgress(100);
+      setTimeout(() => {
+        setLoadingState(false);
+      }, 250);
+
+      setItinerary(result.trip); // exactly backend response
+      setCurrentPage("itinerary");
+
+      const wxLat = result.trip?.center_lat ?? chatData.destinationGeo?.lat;
+      const wxLng = result.trip?.center_lng ?? chatData.destinationGeo?.lng;
+      if (wxLat != null && wxLng != null) {
+        try {
+          const w = await fetchWeather(wxLat, wxLng);
+          setWeather(w);
+        } catch {
+          setWeather(null);
+        }
+      } else {
+        setWeather(null);
+      }
+    } catch (err) {
+      setLoadingState(false);
+      setErrorState({
+        title: "We couldn't build your itinerary",
+        message: mapErrorToMessage(err),
+        status: err?.status || null,
+      });
+      setCurrentPage("chat");
+    }
+  };
+
+  const tryAgain = async () => {
+    await handleBuildTrip();
+  };
+
+  const changeDestination = () => {
+    startNewTrip(1, true);
+  };
+
+  const handleAuth = async () => {
+    setAuthError("");
+    if (authTab === "register" && authForm.password !== authForm.confirmPassword) {
+      setAuthError("Passwords do not match");
+      return;
+    }
+
+    try {
+      const endpoint = authTab === "login" ? "/api/auth/login" : "/api/auth/register";
+      const body = authTab === "login"
+        ? { email: authForm.email, password: authForm.password }
+        : { name: authForm.name, email: authForm.email, password: authForm.password };
+
+      const res = await fetch(apiUrl(endpoint), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("Authentication failed");
+      const data = await res.json();
+      const session = { userId: data.userId, token: data.token, name: data.name || "Traveler", isGuest: false };
+      localStorage.setItem("travelUser", JSON.stringify(session));
+      setUser(session);
+      setCurrentPage("dashboard");
+    } catch {
+      setAuthError("Could not authenticate. Please try again.");
+    }
+  };
+
+  const continueGuest = () => {
+    const session = { userId: `gst_${Date.now()}`, token: "", name: "Guest", isGuest: true };
+    sessionStorage.setItem("travelGuest", JSON.stringify(session));
+    setUser(session);
+    setCurrentPage("dashboard");
+  };
+
+  const logout = () => {
+    localStorage.removeItem("travelUser");
+    sessionStorage.removeItem("travelGuest");
+    setUser(null);
+    setCurrentPage("auth");
+  };
+
+  const fetchTrips = async () => {
+    if (!user?.token) {
+      setSavedTrips([]);
+      return;
+    }
+    try {
+      const res = await fetch(apiUrl("/api/trips"), {
+        headers: { Authorization: `Bearer ${user.token}` },
+      });
+      const data = await res.json();
+      setSavedTrips(Array.isArray(data) ? data : data.trips || []);
+    } catch {
+      setSavedTrips([]);
+    }
+  };
+
+  const openTrips = async () => {
+    await fetchTrips();
+    setCurrentPage("trips");
+  };
+
+  const openTrip = async (trip) => {
+    if (!trip?.id) return;
+    try {
+      const res = await fetch(apiUrl(`/api/trips/${trip.id}`), {
+        headers: { Authorization: `Bearer ${user.token}` },
+      });
+      const data = await res.json();
+      const t = data.trip || data;
+      setItinerary(t);
+      setCurrentPage("itinerary");
+      const wxLat = t?.center_lat ?? chatData.destinationGeo?.lat;
+      const wxLng = t?.center_lng ?? chatData.destinationGeo?.lng;
+      if (wxLat != null && wxLng != null) {
+        try {
+          const w = await fetchWeather(wxLat, wxLng);
+          setWeather(w);
+        } catch {
+          setWeather(null);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const deleteTrip = async (trip) => {
+    if (!trip?.id) return;
+    try {
+      await fetch(apiUrl(`/api/trips/${trip.id}`), {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${user.token}` },
+      });
+      setSavedTrips((prev) => prev.filter((t) => t.id !== trip.id));
+    } catch {
+      // ignore
+    }
+  };
+
+  const weatherDayForStop = (stop) => {
+    const idx = Math.max(0, (stop.day || 1) - 1);
+    const code = weather?.daily?.weathercode?.[idx];
+    const max = weather?.daily?.temperature_2m_max?.[idx] ?? 25;
+    const rain = weather?.daily?.precipitation_probability_max?.[idx] ?? 0;
+    const info = weatherInfoFromCode(code);
+    return {
+      ...info,
+      hint: bestTimeHint(code, max, rain),
+      rain,
+    };
+  };
+
+  const copyPacking = async () => {
+    const text = packingList.map((i) => `${checkedPacking[i] ? "[x]" : "[ ]"} ${i}`).join("\n");
+    await navigator.clipboard.writeText(text);
+    alert("Packing list copied");
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0F172A", color: "#F1F5F9", fontFamily: "Inter, sans-serif" }}>
+      <style>{`
+        * { box-sizing: border-box; }
+        .btn { background:#6366F1;color:#fff;border:0;border-radius:8px;padding:10px 12px;cursor:pointer; }
+        .btn.outline { background:transparent;border:1px solid #6366F1;color:#c7d2fe; }
+        .chip { border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:999px;padding:7px 11px;cursor:pointer; }
+        .chip.active { border-color:#818cf8;background:rgba(99,102,241,.2);color:#e0e7ff; }
+        .card { background:#1E293B;border:1px solid #334155;border-radius:12px; }
+        .custom-marker { width:32px;height:32px;border-radius:50%;background:var(--mcolor);border:2px solid #fff;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;box-shadow:0 2px 10px rgba(0,0,0,.45); }
+        .custom-marker.ring { box-shadow:0 0 0 5px rgba(99,102,241,.25),0 2px 10px rgba(0,0,0,.45); }
+        .route-line { stroke-dasharray:10 10; animation:dashmove 1.2s linear infinite; }
+        @keyframes dashmove { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -20; } }
+        .world { width:220px;height:110px;border:1px dashed #334155;border-radius:12px; position:relative; overflow:hidden; }
+        .plane { position:absolute; left:-20px; top:56px; font-size:20px; animation:fly 3s linear infinite; }
+        @keyframes fly { 0% { transform: translateX(0) translateY(0);} 50% { transform: translateX(120px) translateY(-16px);} 100% { transform: translateX(240px) translateY(0);} }
+      `}</style>
+
+      {currentPage !== "auth" && user && (
+        <div style={{ position: "sticky", top: 0, zIndex: 30, background: "rgba(2,6,23,.92)", borderBottom: "1px solid #334155", padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <button className="btn outline" onClick={() => startNewTrip(0)} style={{ border: 0 }}>✈ TravelMind</button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="btn outline" onClick={() => setCurrentPage("dashboard")}>Dashboard</button>
+            <button className="btn outline" onClick={() => startNewTrip(0)}>New Trip</button>
+            <button className="btn outline" onClick={openTrips}>My Trips</button>
+            <div style={{ width: 34, height: 34, borderRadius: 999, background: "#312e81", border: "1px solid #6366F1", display: "grid", placeItems: "center" }}>{initials(user.name)}</div>
+            <button className="btn outline" onClick={logout}>Logout</button>
+          </div>
+        </div>
+      )}
+
+      {currentPage === "auth" && (
+        <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 16 }}>
+          <div className="card" style={{ width: "100%", maxWidth: 420, padding: 18 }}>
+            <div style={{ textAlign: "center", fontSize: 28 }}>✈️</div>
+            <h2 style={{ textAlign: "center", margin: "8px 0 14px" }}>TravelMind</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+              <button className={`chip ${authTab === "login" ? "active" : ""}`} onClick={() => setAuthTab("login")}>Login</button>
+              <button className={`chip ${authTab === "register" ? "active" : ""}`} onClick={() => setAuthTab("register")}>Register</button>
+            </div>
+            {authTab === "register" && (
+              <input placeholder="Full name" value={authForm.name} onChange={(e) => setAuthForm((p) => ({ ...p, name: e.target.value }))} style={{ width: "100%", marginBottom: 8, padding: 10, borderRadius: 8, border: "1px solid #334155", background: "#0b1220", color: "#e2e8f0" }} />
+            )}
+            <input placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm((p) => ({ ...p, email: e.target.value }))} style={{ width: "100%", marginBottom: 8, padding: 10, borderRadius: 8, border: "1px solid #334155", background: "#0b1220", color: "#e2e8f0" }} />
+            <input type="password" placeholder="Password" value={authForm.password} onChange={(e) => setAuthForm((p) => ({ ...p, password: e.target.value }))} style={{ width: "100%", marginBottom: 8, padding: 10, borderRadius: 8, border: "1px solid #334155", background: "#0b1220", color: "#e2e8f0" }} />
+            {authTab === "register" && (
+              <input type="password" placeholder="Confirm password" value={authForm.confirmPassword} onChange={(e) => setAuthForm((p) => ({ ...p, confirmPassword: e.target.value }))} style={{ width: "100%", marginBottom: 8, padding: 10, borderRadius: 8, border: "1px solid #334155", background: "#0b1220", color: "#e2e8f0" }} />
+            )}
+            <button className="btn" style={{ width: "100%" }} onClick={handleAuth}>{authTab === "login" ? "Login" : "Register"}</button>
+            <div style={{ margin: "12px 0", textAlign: "center", color: "#94A3B8" }}>or continue with</div>
+            <button className="btn outline" style={{ width: "100%" }} onClick={continueGuest}>Continue as Guest</button>
+            {authError && <p style={{ color: "#fca5a5", fontSize: 12 }}>{authError}</p>}
+          </div>
+        </div>
+      )}
+
+      {currentPage === "dashboard" && (
+        <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
+          <div className="card" style={{ padding: 14, marginBottom: 12 }}>
+            <h2 style={{ margin: 0 }}>Dashboard</h2>
+            <p style={{ color: "#94A3B8" }}>Create a new trip or review your saved itineraries.</p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="btn" onClick={() => startNewTrip(0, true)}>Create New Trip</button>
+              <button className="btn outline" onClick={openTrips}>View My Trips</button>
+              {itinerary && <button className="btn outline" onClick={() => setCurrentPage("itinerary")}>Open Current Itinerary</button>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {currentPage === "chat" && (
+        <div style={{ maxWidth: 700, margin: "0 auto", padding: 20 }}>
+          <h1 style={{ fontWeight: 300, textAlign: "center", margin: "8px 0 10px" }}>Where do you want to go?</h1>
+          <div style={{ height: 4, borderRadius: 999, background: "#1E293B", overflow: "hidden", marginBottom: 12 }}>
+            <div style={{ height: "100%", width: `${progressPct}%`, background: "linear-gradient(90deg,#6366F1,#818CF8)" }} />
+          </div>
+          <div className="card" style={{ padding: 12, maxHeight: "50vh", overflow: "auto" }}>
+            {chatHistory.map((m, i) => (
+              <div key={i} style={{ maxWidth: "84%", margin: "8px 0", marginLeft: m.sender === "user" ? "auto" : 0, background: m.sender === "user" ? "linear-gradient(135deg,#4F46E5,#6366F1)" : "#111827", border: "1px solid #334155", borderRadius: 12, padding: "10px 12px" }}>{m.text}</div>
+            ))}
+            {typing && (
+              <div style={{ background: "#111827", border: "1px solid #334155", borderRadius: 12, display: "inline-block", padding: "8px 10px" }}>
+                <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 999, background: "#94A3B8", margin: 2 }} />
+                <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 999, background: "#94A3B8", margin: 2 }} />
+                <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 999, background: "#94A3B8", margin: 2 }} />
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          <div className="card" style={{ padding: 12, marginTop: 10 }}>
+            {[0, 1, 6].includes(currentQuestion) && (
+              <div style={{ position: "relative" }}>
+                <input
+                  value={textInput}
+                  onChange={(e) => setTextInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown" && suggestions.length) {
+                      e.preventDefault();
+                      setSelectedSuggestion((prev) => (prev + 1) % suggestions.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp" && suggestions.length) {
+                      e.preventDefault();
+                      setSelectedSuggestion((prev) => (prev <= 0 ? suggestions.length - 1 : prev - 1));
+                      return;
+                    }
+                    if (e.key === "Enter") {
+                      if (selectedSuggestion >= 0 && suggestions[selectedSuggestion]) {
+                        e.preventDefault();
+                        selectPlace(suggestions[selectedSuggestion]);
+                        return;
+                      }
+                      submitAnswerText();
+                    }
+                  }}
+                  placeholder={currentQuestion === 6 ? "e.g. no spicy food, wheelchair accessible..." : "Type your answer..."}
+                  style={{ width: "100%", padding: 10, borderRadius: 8, border: `1px solid ${inputFlash ? "#22c55e" : "#334155"}`, boxShadow: inputFlash ? "0 0 0 2px rgba(34,197,94,.25)" : "none", background: "#0b1220", color: "#e2e8f0" }}
+                />
+                {(currentQuestion === 0 || currentQuestion === 1) && (
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+                    <button className="btn outline" onClick={useCurrentLocation}>📍 Use current location</button>
+                    {suggestionLoading && <span style={{ fontSize: 12, color: "#94A3B8" }}>Searching places...</span>}
+                  </div>
+                )}
+                {suggestions.length > 0 && (currentQuestion === 0 || currentQuestion === 1) && (
+                  <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1E293B", border: "0.5px solid #334155", borderRadius: 10, zIndex: 100, overflow: "hidden", boxShadow: "0 8px 32px rgba(0,0,0,.4)" }}>
+                    {suggestions.map((s, i) => (
+                      <div
+                        key={`${s.label}-${i}`}
+                        onClick={() => selectPlace(s)}
+                        onMouseEnter={() => { setHoveredSuggestion(i); setSelectedSuggestion(i); }}
+                        style={{ padding: "10px 14px", cursor: "pointer", background: (hoveredSuggestion === i || selectedSuggestion === i) ? "#334155" : "transparent", color: "#F1F5F9", borderBottom: "0.5px solid #1E293B", display: "flex", gap: 10 }}
+                      >
+                        <span>📍</span>
+                        <div>
+                          <p style={{ margin: 0, fontWeight: 500 }}>{s.city}</p>
+                          <p style={{ margin: 0, fontSize: 11, color: "#64748B" }}>{s.label}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button className="btn" style={{ marginTop: 10, width: "100%" }} onClick={submitAnswerText}>Continue</button>
+              </div>
+            )}
+
+            {currentQuestion === 2 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[3, 5, 7, 10].map((d) => (
+                  <button key={d} className="chip" onClick={() => {
+                    setChatData((p) => ({ ...p, days: d }));
+                    setChatHistory((prev) => [...prev, { sender: "user", text: `${d} days` }]);
+                    goNextQuestion(3);
+                  }}>{d} days</button>
+                ))}
+              </div>
+            )}
+
+            {currentQuestion === 3 && (
+              <>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {["Culture", "Nature", "Food", "Nightlife", "Wellness", "Shopping"].map((v) => (
+                    <button key={v} className={`chip ${chatData.vibes.includes(v) ? "active" : ""}`} onClick={() => setChatData((p) => ({ ...p, vibes: p.vibes.includes(v) ? p.vibes.filter((x) => x !== v) : [...p.vibes, v] }))}>{v}</button>
+                  ))}
+                </div>
+                <button className="btn" style={{ width: "100%", marginTop: 10 }} onClick={() => {
+                  setChatHistory((prev) => [...prev, { sender: "user", text: chatData.vibes.join(", ") || "Open" }]);
+                  goNextQuestion(4);
+                }}>Continue</button>
+              </>
+            )}
+
+            {currentQuestion === 4 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {["Solo", "Couple", "Family", "Friends"].map((g) => (
+                  <button key={g} className="chip" onClick={() => {
+                    setChatData((p) => ({ ...p, group_type: g }));
+                    setChatHistory((prev) => [...prev, { sender: "user", text: g }]);
+                    goNextQuestion(5);
+                  }}>{g}</button>
+                ))}
+              </div>
+            )}
+
+            {currentQuestion === 5 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {["Budget", "Mid-range", "Comfort", "Luxury"].map((b) => (
+                  <button key={b} className="chip" onClick={() => {
+                    setChatData((p) => ({ ...p, budget_level: b }));
+                    setChatHistory((prev) => [...prev, { sender: "user", text: b }]);
+                    goNextQuestion(6);
+                  }}>{b}</button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {readyToBuild && (
+            <button className="btn" style={{ width: "100%", marginTop: 12 }} onClick={handleBuildTrip}>Build My Itinerary →</button>
+          )}
+
+          {errorState && (
+            <div className="card" style={{ marginTop: 12, padding: 12 }}>
+              <h3 style={{ margin: "0 0 6px" }}>{errorState.title}</h3>
+              <p style={{ margin: "0 0 10px", color: "#94A3B8" }}>{errorState.message}</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn" onClick={tryAgain}>Try Again</button>
+                <button className="btn outline" onClick={changeDestination}>Change Destination</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {currentPage === "itinerary" && itinerary && (
+        <div style={{ maxWidth: 1320, margin: "0 auto", padding: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "42% 58%", gap: 12 }}>
+            <div className="card" style={{ maxHeight: "calc(100vh - 92px)", overflow: "auto" }}>
+              <div style={{ position: "sticky", top: 0, zIndex: 5, background: "#111827", borderBottom: "1px solid #334155", padding: 12 }}>
+                <div style={{ fontSize: 22, fontWeight: 700 }}>✈️ {itinerary.origin} → {itinerary.destination}</div>
+                <div style={{ color: "#94A3B8", marginTop: 3 }}>{itinerary.duration_days} days • {(itinerary.vibes || []).join(", ") || "No vibe"} • {itinerary.group_type}</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  <button className={`chip ${activePace === "relaxed" ? "active" : ""}`} onClick={() => setActivePace("relaxed")}>🐢 Relaxed</button>
+                  <button className={`chip ${activePace === "balanced" ? "active" : ""}`} onClick={() => setActivePace("balanced")}>⚡ Balanced</button>
+                  <button className={`chip ${activePace === "fastpaced" ? "active" : ""}`} onClick={() => setActivePace("fastpaced")}>🚀 Fast-paced</button>
+                  <button className="btn outline" onClick={() => startNewTrip(0)}>↺ Replan</button>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  {["itinerary", "hotels", "food", "pack"].map((tab) => (
+                    <button key={tab} className={`chip ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>{tab === "itinerary" ? "📅 Itinerary" : tab === "hotels" ? "🏨 Hotels" : tab === "food" ? "🍜 Food" : "🎒 Pack"}</button>
+                  ))}
+                </div>
+                {weather?.current_weather && (
+                  <div style={{ marginTop: 10, display: "inline-flex", gap: 8, alignItems: "center", padding: "6px 10px", borderRadius: 999, background: "rgba(99,102,241,.18)", border: "1px solid #6366F1" }}>
+                    <span>{weatherInfoFromCode(weather.current_weather.weathercode).emoji} {Math.round(weather.current_weather.temperature)}°C</span>
+                  </div>
+                )}
+                {isRainBanner && <div style={{ marginTop: 8, color: "#fbbf24" }}>🌧️ Rain expected on Day 3 - indoor stops highlighted</div>}
+              </div>
+
+              <div style={{ padding: 12 }}>
+                {activeTab === "itinerary" && itineraryDays.map((d, idx) => {
+                  const dayStops = allStops.filter((s) => s.day === d.day);
+                  return (
+                    <div key={d.day} className="card" style={{ marginBottom: 10, borderLeft: `4px solid ${dayColors[idx % dayColors.length]}` }}>
+                      <button
+                        onClick={() => setExpandedDays((p) => ({ ...p, [d.day]: !p[d.day] }))}
+                        style={{ width: "100%", background: "transparent", color: "#F1F5F9", border: 0, textAlign: "left", padding: 10, cursor: "pointer", display: "flex", justifyContent: "space-between" }}
+                      >
+                        <span><strong>Day {d.day}</strong> - {d.title}</span>
+                        <span>{expandedDays[d.day] ? "▾" : "▸"}</span>
+                      </button>
+                      {expandedDays[d.day] && (
+                        <div style={{ padding: "0 10px 10px" }}>
+                          {dayStops.map((s, i) => {
+                            const w = weatherDayForStop(s);
+                            return (
+                              <div
+                                key={s.key}
+                                ref={(el) => { stopRefs.current[s.key] = el; }}
+                                onMouseEnter={() => setActiveStopKey(s.key)}
+                                onMouseLeave={() => setActiveStopKey("")}
+                                onClick={() => {
+                                  setActiveStopKey(s.key);
+                                  const marker = markersRef.current[s.key];
+                                  if (marker && mapRef.current) mapRef.current.flyTo([s.lat, s.lng], 13, { duration: 0.7 });
+                                }}
+                                style={{ marginTop: 8, borderRadius: 10, borderLeft: activeStopKey === s.key ? "3px solid #6366F1" : "3px solid #334155", background: "#0b1220", padding: 10, transform: activeStopKey === s.key ? "translateY(-2px)" : "none", transition: "all .2s" }}
+                              >
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                  <div style={{ fontWeight: 600 }}>{i + 1}. {s.name}</div>
+                                  <div style={{ fontSize: 11, color: w.tone, border: `1px solid ${w.tone}`, borderRadius: 999, padding: "2px 8px" }}>{w.emoji} {w.badge}</div>
+                                </div>
+                                <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 3 }}>{s.description || ""}</div>
+                                <div style={{ marginTop: 4, fontSize: 11 }}>⏱ {s.displayArrival} • {Math.round(s.displayDuration)}m • 💰 {s.cost_usd ?? 0}</div>
+                                <div style={{ marginTop: 4, fontSize: 11, color: "#c4b5fd", fontStyle: "italic" }}>{s.pro_tip || ""}</div>
+                                <div style={{ marginTop: 4, fontSize: 11, color: "#a5b4fc", fontStyle: "italic" }}>{w.hint}</div>
+                                {s.indoorTag && <div style={{ marginTop: 4, fontSize: 11, color: "#93C5FD" }}>🏛️ Indoor</div>}
+                                {activePace === "fastpaced" && <div style={{ marginTop: 4, fontSize: 11, color: "#fbbf24" }}>Quick visit</div>}
+                                {activePace === "relaxed" && <div style={{ marginTop: 4, fontSize: 11, color: "#34d399" }}>Take your time here</div>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {activeTab === "hotels" && itineraryDays.map((d) => (
+                  <div key={`h-${d.day}`} className="card" style={{ marginBottom: 10, padding: 10 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 8 }}>Day {d.day} Hotels</div>
+                    {(d.hotels || []).map((h, i) => (
+                      <div key={`h-${d.day}-${i}`} style={{ padding: 8, borderRadius: 8, background: "#0b1220", marginBottom: 8 }}>
+                        <div style={{ fontWeight: 600 }}>{h.name}</div>
+                        <div style={{ color: "#F59E0B", fontSize: 12 }}>{"★".repeat(h.stars || 3)}</div>
+                        <div style={{ fontSize: 12 }}>{h.price_usd != null ? `$${h.price_usd}/night` : "Price not provided"}</div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+
+                {activeTab === "food" && (() => {
+                  const grouped = {};
+                  itineraryDays.forEach((d) => {
+                    (d.food || []).forEach((f) => {
+                      const k = f.meal_type || "Other";
+                      if (!grouped[k]) grouped[k] = [];
+                      grouped[k].push(f);
+                    });
+                  });
+                  return Object.entries(grouped).map(([meal, items]) => (
+                    <div key={meal} className="card" style={{ marginBottom: 10, padding: 10 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 8 }}>{meal}</div>
+                      {items.map((f, i) => (
+                        <div key={`${meal}-${i}`} style={{ padding: 8, borderRadius: 8, background: "#0b1220", marginBottom: 8 }}>
+                          <div style={{ fontWeight: 600 }}>{f.emoji || "🍽️"} {f.name}</div>
+                          <div style={{ fontSize: 12, color: "#94A3B8" }}>{f.restaurant}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ));
+                })()}
+
+                {activeTab === "pack" && (
+                  <div className="card" style={{ padding: 10 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 8 }}>Packing Checklist</div>
+                    {packingList.map((item) => (
+                      <label key={item} style={{ display: "block", marginBottom: 6, textDecoration: checkedPacking[item] ? "line-through" : "none", opacity: checkedPacking[item] ? 0.7 : 1 }}>
+                        <input type="checkbox" checked={Boolean(checkedPacking[item])} onChange={() => setCheckedPacking((p) => ({ ...p, [item]: !p[item] }))} style={{ marginRight: 8 }} />
+                        {item}
+                      </label>
+                    ))}
+                    <button className="btn outline" onClick={copyPacking}>Copy List</button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="card" style={{ position: "relative", overflow: "hidden", minHeight: 680 }}>
+              <div style={{ position: "absolute", top: 10, right: 10, zIndex: 5, padding: "6px 10px", borderRadius: 999, background: "rgba(15,23,42,.9)", border: "1px solid #334155", fontSize: 12 }}>
+                📍 {itinerary.destination} {weather?.current_weather ? `${weatherInfoFromCode(weather.current_weather.weathercode).emoji} ${Math.round(weather.current_weather.temperature)}°C` : ""}
+              </div>
+              <div style={{ position: "absolute", left: 10, top: 10, right: 10, zIndex: 4, padding: "8px 10px", borderRadius: 10, background: "rgba(15,23,42,.8)", border: "1px solid #334155", color: "#cbd5e1", fontSize: 12 }}>
+                📥 Planning to travel? Download offline maps for {itinerary.destination} on Google Maps or Maps.me before you go →
+              </div>
+              <div ref={mapContainerRef} style={{ width: "100%", height: 680 }} />
+              <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, display: "flex", overflowX: "auto", gap: 8, zIndex: 4 }}>
+                {weatherStrip.map((w) => (
+                  <div key={w.key} style={{ minWidth: 86, padding: "6px 8px", borderRadius: 8, background: "rgba(15,23,42,.86)", border: "1px solid #334155", fontSize: 12 }}>{w.label} {w.emoji} {w.temp}°</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {currentPage === "trips" && (
+        <div style={{ maxWidth: 1000, margin: "0 auto", padding: 16 }}>
+          <div style={{ marginBottom: 8 }}>
+            <button className="btn outline" onClick={() => setCurrentPage("dashboard")}>← Back to Dashboard</button>
+          </div>
+          <h2 style={{ marginTop: 0 }}>My Trips</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 10 }}>
+            {savedTrips.length === 0 && <div className="card" style={{ padding: 12 }}>No trips yet.</div>}
+            {savedTrips.map((t, idx) => (
+              <div className="card" style={{ padding: 12 }} key={t.id || idx}>
+                <div style={{ fontWeight: 600 }}>{t.origin} → {t.destination}</div>
+                <div style={{ color: "#94A3B8", fontSize: 12 }}>{t.duration_days || 1} days</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button className="btn" onClick={() => openTrip(t)}>Open</button>
+                  <button className="btn outline" onClick={() => deleteTrip(t)}>Delete</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {loadingState && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(2,6,23,.95)", display: "grid", placeItems: "center" }}>
+          <div className="card" style={{ width: "min(560px, 92vw)", padding: 18, textAlign: "center" }}>
+            <div className="world" style={{ margin: "0 auto 12px" }}>
+              <div style={{ position: "absolute", inset: 8, border: "1px solid rgba(99,102,241,.4)", borderRadius: 10, animation: "pulse 1.6s ease-in-out infinite" }} />
+              <div className="plane">✈️</div>
+            </div>
+            <div style={{ fontSize: 15, color: "#cbd5e1", minHeight: 22 }}>{STATUS_MESSAGES[loadingStatusIndex]}</div>
+            <div style={{ height: 8, borderRadius: 999, background: "#0b1220", marginTop: 12, overflow: "hidden" }}>
+              <div style={{ width: `${loadingProgress}%`, height: "100%", background: "linear-gradient(90deg,#6366F1,#22D3EE)", transition: "width .2s" }} />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: "#94A3B8" }}>{loadingProgress}%</div>
+          </div>
+        </div>
+      )}
+
+      {resetModalOpen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 90, background: "rgba(2,6,23,.82)", display: "grid", placeItems: "center" }}>
+          <div className="card" style={{ width: "min(420px, 92vw)", padding: 16 }}>
+            <h3 style={{ marginTop: 0 }}>Start a new trip?</h3>
+            <p style={{ color: "#94A3B8" }}>Your current plan will be cleared.</p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn outline" onClick={() => setResetModalOpen(false)}>Cancel</button>
+              <button className="btn" onClick={confirmStartFresh}>Yes, start fresh</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

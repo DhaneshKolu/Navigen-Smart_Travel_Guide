@@ -1,0 +1,52 @@
+.settings-page {
+  min-height: 100vh;
+  padding: 24px;
+  background: linear-gradient(140deg, #081c2e 0%, #0f3d57 45%, #ffd166 140%);
+}
+
+.settings-header {
+  max-width: 980px;
+  margin: 0 auto 20px auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: #fff;
+}
+
+.settings-back {
+  color: #fff;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.settings-grid {
+  max-width: 980px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.settings-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+.settings-error {
+  color: #b91c1c;
+}
+
+.theme-toggle {
+  margin-top: 10px;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  color: #fff;
+  background: linear-gradient(120deg, #ef4444, #f97316);
+}
