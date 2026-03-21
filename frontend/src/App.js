@@ -50,9 +50,135 @@ const PACKING = {
   Friends:['Group playlist','Portable speaker'],
 };
 
+const PREFS_KEY = 'travelPrefs';
+const THEME_KEY = 'travelTheme';
+const HOTEL_CAPS = {
+  Budget: { max: 6, label: 'Under $6/night   (₹500)' },
+  Relaxed: { max: 18, label: '$6-18/night      (₹500-1,500)' },
+  Luxury: { max: 35, label: '$18-35/night     (₹1,500-2,900)' },
+  Ultra: { max: 9999, label: '$35+/night        (₹2,900+)' },
+};
+const FOOD_CAPS = {
+  Budget: 3,
+  Relaxed: 9,
+  Luxury: 15,
+  Ultra: 9999,
+};
+const RADIUS_KM = {
+  walkable: 5,
+  city: 20,
+  regional: 50,
+  flexible: Infinity,
+};
+const defaultPrefs = {
+  theme: 'dark',
+  currency: 'USD',
+  pace: 'balanced',
+  distanceUnit: 'km',
+  tempUnit: 'C',
+  defaultOrigin: '',
+  defaultVibes: [],
+  defaultGroup: '',
+  notifications: { reminders: true, weather: true, features: true }
+};
+
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const conv = (usd, cur) => usd ? Math.round((usd||0) * EXCHANGE[cur]) : 0;
 const initials = n => String(n||'T').split(/\s+/).filter(Boolean).slice(0,2).map(p=>p[0].toUpperCase()).join('') || 'T';
+const formatDate = (value) => {
+  if (!value) return 'Recently';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Recently';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
+};
+
+function resolveTheme(theme) {
+  if (theme === 'system') {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  return theme;
+}
+
+function applyTheme(theme) {
+  const finalTheme = resolveTheme(theme || 'dark');
+  document.documentElement.setAttribute('data-theme', finalTheme);
+}
+
+function filterHotelsByBudget(hotels, budgetLevel) {
+  const cap = HOTEL_CAPS[budgetLevel]?.max || 9999;
+  const safeHotels = Array.isArray(hotels) ? hotels : [];
+  const filtered = safeHotels.filter(h => (h.price_usd || 0) <= cap);
+  if (filtered.length === 0) {
+    return [...safeHotels]
+      .sort((a, b) => (a.price_usd || 0) - (b.price_usd || 0))
+      .slice(0, 2)
+      .map(h => ({ ...h, overBudget: true }));
+  }
+  return [...filtered].sort((a, b) => {
+    if (a.recommended) return -1;
+    if (b.recommended) return 1;
+    return (a.price_usd || 0) - (b.price_usd || 0);
+  });
+}
+
+function nearestNeighborSort(stops) {
+  if (!Array.isArray(stops) || stops.length <= 2) return stops || [];
+  const valid = stops.every(s => Number.isFinite(s?.lat) && Number.isFinite(s?.lng));
+  if (!valid) return stops;
+
+  const haversine = (a, b) => {
+    const R = 6371;
+    const dLat = (b.lat - a.lat) * Math.PI / 180;
+    const dLng = (b.lng - a.lng) * Math.PI / 180;
+    const x = Math.sin(dLat / 2) ** 2 +
+      Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) *
+      Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  };
+
+  const remaining = [...stops];
+  const sorted = [{ ...remaining.shift() }];
+  while (remaining.length) {
+    const last = sorted[sorted.length - 1];
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+    remaining.forEach((s, i) => {
+      const d = haversine(last, s);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestIdx = i;
+      }
+    });
+    const nearest = remaining.splice(nearestIdx, 1)[0];
+    sorted.push({ ...nearest, _distFromPrev: nearestDist.toFixed(1) });
+  }
+  return sorted;
+}
+
+function computeStats(trips) {
+  const safeTrips = Array.isArray(trips) ? trips : [];
+  const totalTrips = safeTrips.length;
+  const totalStops = safeTrips.reduce((a, t) =>
+    a + (t.days || []).reduce((b, d) => b + (d.stops?.length || 0), 0), 0);
+  const countries = new Set(safeTrips.map(t => t.destination_country).filter(Boolean));
+  const totalSpend = safeTrips.reduce((a, t) => {
+    const days = t.days || [];
+    return a + days.reduce((b, d) => {
+      const hotels = d.hotels?.[0]?.price_usd || 0;
+      const food = (d.food || []).reduce((c, f) => c + (f.cost_usd || 0), 0);
+      const acts = (d.stops || []).reduce((c, s) => c + (s.cost_usd || 0), 0);
+      return b + hotels + food + acts;
+    }, 0);
+  }, 0);
+
+  return {
+    trips: totalTrips,
+    stops: totalStops,
+    countries: countries.size,
+    saved: Math.round(totalSpend)
+  };
+}
+
 const wxFor = code => {
   const c = Number(code);
   if (c <= 1) return WX_MAP[0];
@@ -131,7 +257,7 @@ function RippleBtn({ onClick, children, style, className }) {
 
 function TypingDots() {
   return (
-    <div style={{ display:'flex', gap:6, padding:'14px 18px', background:'#1E293B', borderRadius:16, borderBottomLeftRadius:4, display:'inline-flex', alignItems:'center' }}>
+    <div style={{ gap:6, padding:'14px 18px', background:'#1E293B', borderRadius:16, borderBottomLeftRadius:4, display:'inline-flex', alignItems:'center' }}>
       {[0,1,2].map(i=>(
         <span key={i} style={{ width:8, height:8, borderRadius:'50%', background:'#6366F1', display:'block', animation:`bounce 1.2s ease-in-out ${i*0.2}s infinite` }}/>
       ))}
@@ -150,6 +276,7 @@ function QualityBadge({ rating }) {
 export default function App() {
   // ── Page & Auth ──
   const [page, setPage] = useState('auth');
+  const [pageTransition, setPageTransition] = useState(false);
   const [user, setUser] = useState(null);
   const [authTab, setAuthTab] = useState('login');
   const [authForm, setAuthForm] = useState({ name:'', email:'', password:'', confirm:'' });
@@ -178,6 +305,7 @@ export default function App() {
   const [itin, setItin] = useState(null);
   const [weather, setWeather] = useState(null);
   const [savedTrips, setSavedTrips] = useState([]);
+  const [savedLoading, setSavedLoading] = useState(false);
   const [activeDay, setActiveDay] = useState(1);
   const [activeCur, setActiveCur] = useState('USD');
   const [activePace, setActivePace] = useState('balanced');
@@ -186,8 +314,11 @@ export default function App() {
   const [activeStop, setActiveStop] = useState(null);
   const [checkedPack, setCheckedPack] = useState({});
   const [transportModes, setTransportModes] = useState({});
-  const [expandedDays, setExpandedDays] = useState({});
   const [completedStops, setCompletedStops] = useState({});
+  const [rankBy, setRankBy] = useState('recommended');
+  const [rankSection, setRankSection] = useState('all');
+  const [comfortFilter, setComfortFilter] = useState(false);
+  const [showTooltip, setShowTooltip] = useState(null);
 
   // ── UI ──
   const [loading, setLoading] = useState(false);
@@ -199,7 +330,14 @@ export default function App() {
   const [mapReady, setMapReady] = useState(false);
   const [mapLayer, setMapLayer] = useState('dark');
   const [dayTransition, setDayTransition] = useState(false);
-  const [showComparisons, setShowComparisons] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [prefs, setPrefs] = useState(defaultPrefs);
+  const [profileNameEdit, setProfileNameEdit] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [showPwdForm, setShowPwdForm] = useState(false);
+  const [pwdForm, setPwdForm] = useState({ current:'', next:'', confirm:'' });
+  const [deleteModal, setDeleteModal] = useState('');
 
   // ── Refs ──
   const mapRef = useRef(null);
@@ -208,6 +346,7 @@ export default function App() {
   const polylinesRef = useRef([]);
   const chatEnd = useRef(null);
   const suggTimer = useRef(null);
+  const dropdownRef = useRef(null);
 
   const QUESTIONS = useMemo(() => [
     `Hey${user?.name ? ' ' + user.name.split(' ')[0] : ''}! Where are you starting your journey from?`,
@@ -234,47 +373,86 @@ export default function App() {
     {
       icon: '🎒',
       label: 'Budget',
-      sub: 'Under $25/day',
+      sub: '$0-10/day',
       value: 'Budget',
-      range: '$0–25',
-      examples: 'Hostels, street food, public transport',
-      color: '#10B981'
+      range: '$0-10',
+      usd_min: 0,
+      usd_max: 10,
+      inr_range: '₹0-830/day',
+      examples: 'Dormitory hostels, street food, local buses',
+      color: '#10B981',
+      hotel_max_usd: 6
     },
     {
-      icon: '🏨',
-      label: 'Mid-range',
-      sub: '$25–75/day',
-      value: 'Mid-range',
-      range: '$25–75',
-      examples: '3-star hotels, local restaurants, taxis',
-      color: '#0EA5E9'
+      icon: '🏡',
+      label: 'Relaxed',
+      sub: '$10-30/day',
+      value: 'Relaxed',
+      range: '$10-30',
+      usd_min: 10,
+      usd_max: 30,
+      inr_range: '₹830-2,500/day',
+      examples: 'Budget guesthouses, dhabas, shared autos',
+      color: '#0EA5E9',
+      hotel_max_usd: 18
     },
     {
       icon: '✨',
-      label: 'Comfort',
-      sub: '$75–150/day',
-      value: 'Comfort',
-      range: '$75–150',
-      examples: '4-star hotels, fine dining, private tours',
-      color: '#8B5CF6'
+      label: 'Luxury',
+      sub: '$30-50/day',
+      value: 'Luxury',
+      range: '$30-50',
+      usd_min: 30,
+      usd_max: 50,
+      inr_range: '₹2,500-4,200/day',
+      examples: '3-star hotels, sit-down restaurants, Ola/Uber',
+      color: '#8B5CF6',
+      hotel_max_usd: 35
     },
     {
       icon: '👑',
-      label: 'Luxury',
-      sub: '$150+/day',
-      value: 'Luxury',
-      range: '$150+',
-      examples: '5-star resorts, Michelin dining, VIP access',
-      color: '#F59E0B'
+      label: 'Ultra',
+      sub: '$50+/day',
+      value: 'Ultra',
+      range: '$50+',
+      usd_min: 50,
+      usd_max: null,
+      inr_range: '₹4,200+/day',
+      examples: '4-5 star hotels, fine dining, private cabs',
+      color: '#F59E0B',
+      hotel_max_usd: 9999
     },
   ], []);
 
   const budgetRangeMap = useMemo(() => ({
-    Budget: { min: 0, max: 25 },
-    'Mid-range': { min: 25, max: 75 },
-    Comfort: { min: 75, max: 150 },
-    Luxury: { min: 150, max: null },
+    Budget: { min: 0, max: 10 },
+    Relaxed: { min: 10, max: 30 },
+    Luxury: { min: 30, max: 50 },
+    Ultra: { min: 50, max: null },
   }), []);
+
+  const budgetPillMap = useMemo(() => ({
+    Budget: '🎒 Budget ($0-10/day)',
+    Relaxed: '🏡 Relaxed ($10-30/day)',
+    Luxury: '✨ Luxury ($30-50/day)',
+    Ultra: '👑 Ultra ($50+/day)',
+  }), []);
+  const rankOptions = useMemo(() => [
+    { value:'recommended', label:'⭐ Best match', applies:['hotels','food','stops'] },
+    { value:'price_low', label:'💰 Price: Low→High', applies:['hotels','food','stops'] },
+    { value:'price_high', label:'💰 Price: High→Low', applies:['hotels','food','stops'] },
+    { value:'rating', label:'🌟 Top rated', applies:['hotels','food','stops'] },
+    { value:'distance', label:'📍 Nearest first', applies:['stops'] },
+    { value:'duration', label:'⏱ Shortest first', applies:['stops'] },
+    { value:'budget_fit', label:'🎯 Budget fit', applies:['hotels','food'] },
+  ], []);
+
+  const rankTarget = activeTab === 'itinerary' ? 'stops' : (activeTab === 'pack' ? 'stops' : activeTab);
+  const relevantRanks = useMemo(
+    () => rankOptions.filter(r => r.applies.includes(rankTarget)),
+    [rankOptions, rankTarget]
+  );
+
   const packingList = useMemo(() => buildPacking(itin, weather), [itin, weather]);
 
   const dayStops = useMemo(() => {
@@ -285,6 +463,76 @@ export default function App() {
   }, [itin, activeDay, activePace]);
 
   const currentDayData = useMemo(() => itin?.days?.find(d=>d.day===activeDay), [itin, activeDay]);
+
+  const applyComfortFilter = useCallback((items, type, budgetLevel, comfortRadius) => {
+    if (!comfortFilter) return items;
+    return (items || []).filter(item => {
+      const price = item.price_usd || item.cost_usd || 0;
+      const dist = parseFloat(item._distFromPrev || item.distance_from_last_stop || 0);
+      const cap = type === 'hotel'
+        ? (HOTEL_CAPS[budgetLevel]?.max || 9999)
+        : type === 'food'
+          ? (FOOD_CAPS[budgetLevel] || 9999)
+          : 9999;
+      const radiusCap = RADIUS_KM[comfortRadius] || Infinity;
+      const budgetOk = price === 0 || price <= cap;
+      const radiusOk = dist === 0 || dist <= radiusCap;
+      return budgetOk && radiusOk;
+    });
+  }, [comfortFilter]);
+
+  const rankedHotels = useMemo(() => {
+    const hotels = currentDayData?.hotels || [];
+    return rankItems(hotels, rankBy, 'hotel', itin?.budget_level, itin?.comfort_radius);
+  }, [currentDayData, rankBy, itin]);
+
+  const displayedHotels = useMemo(
+    () => applyComfortFilter(rankedHotels, 'hotel', itin?.budget_level, itin?.comfort_radius),
+    [rankedHotels, applyComfortFilter, itin]
+  );
+
+  const rankedFood = useMemo(() => {
+    const food = currentDayData?.food || [];
+    return rankItems(food, rankBy, 'food', itin?.budget_level, itin?.comfort_radius);
+  }, [currentDayData, rankBy, itin]);
+
+  const displayedFood = useMemo(
+    () => applyComfortFilter(rankedFood, 'food', itin?.budget_level, itin?.comfort_radius),
+    [rankedFood, applyComfortFilter, itin]
+  );
+
+  const rankedStops = useMemo(() => {
+    if (!dayStops.length) return [];
+    if (rankBy === 'recommended') return dayStops;
+    return rankItems(dayStops, rankBy, 'stop', itin?.budget_level, itin?.comfort_radius);
+  }, [dayStops, rankBy, itin]);
+
+  const displayedStops = useMemo(
+    () => applyComfortFilter(rankedStops, 'stop', itin?.budget_level, itin?.comfort_radius),
+    [rankedStops, applyComfortFilter, itin]
+  );
+
+  const rerankedStops = useMemo(() => computeStopTimes(displayedStops, activePace), [displayedStops, activePace]);
+
+  const allHotels = useMemo(() => {
+    const hotels = (itin?.days || []).flatMap(d =>
+      (d.hotels || []).map(h => ({ ...h, _day: d.day, _dayTitle: d.title }))
+    );
+    const ranked = rankItems(hotels, rankBy, 'hotel', itin?.budget_level, itin?.comfort_radius);
+    return applyComfortFilter(ranked, 'hotel', itin?.budget_level, itin?.comfort_radius);
+  }, [itin, rankBy, applyComfortFilter]);
+
+  const foodByMeal = useMemo(() => {
+    const mealTypes = ['Breakfast','Lunch','Dinner','Snack','Drinks','Dessert'];
+    return mealTypes.map((mealType) => {
+      const mealsOfType = (itin?.days || [])
+        .flatMap(d => (d.food || []).map(f => ({ ...f, _day: d.day })))
+        .filter(f => f.meal_type === mealType);
+      const ranked = rankItems(mealsOfType, rankBy, 'food', itin?.budget_level, itin?.comfort_radius);
+      const filtered = applyComfortFilter(ranked, 'food', itin?.budget_level, itin?.comfort_radius);
+      return { mealType, items: filtered };
+    });
+  }, [itin, rankBy, applyComfortFilter]);
 
   const totalCost = useMemo(() => {
     if (!itin?.days) return { hotels:0, food:0, activities:0, transport:0 };
@@ -300,13 +548,53 @@ export default function App() {
   }, [itin]);
 
   const grandTotal = totalCost.hotels + totalCost.food + totalCost.activities + totalCost.transport;
+  const profileStats = useMemo(() => computeStats(savedTrips), [savedTrips]);
+  const recentTrips = useMemo(() => [...savedTrips].slice(-3).reverse(), [savedTrips]);
+
+  const navigateTo = useCallback((newPage) => {
+    setDropdownOpen(false);
+    setPageTransition(true);
+    setTimeout(() => {
+      setPage(newPage);
+      setPageTransition(false);
+    }, 180);
+  }, []);
+
+  const showToast = useCallback((msg, type='success') => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts(p => [...p, { id, msg, type }]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3500);
+  }, []);
 
   // ── Effects ──
   useEffect(() => {
     const su = localStorage.getItem('travelUser');
     const gu = sessionStorage.getItem('travelGuest');
-    if (su) { const u = JSON.parse(su); setUser(u); setPage('dashboard'); }
-    else if (gu) { const u = JSON.parse(gu); setUser(u); setPage('dashboard'); }
+    if (su) { const u = JSON.parse(su); setUser(u); setProfileName(u?.name || ''); setPage('dashboard'); }
+    else if (gu) { const u = JSON.parse(gu); setUser(u); setProfileName(u?.name || ''); setPage('dashboard'); }
+
+    const savedPrefsRaw = localStorage.getItem(PREFS_KEY);
+    const savedTheme = localStorage.getItem(THEME_KEY);
+    let resolved = defaultPrefs;
+    if (savedPrefsRaw) {
+      try {
+        resolved = {
+          ...defaultPrefs,
+          ...JSON.parse(savedPrefsRaw),
+          notifications: {
+            ...defaultPrefs.notifications,
+            ...(JSON.parse(savedPrefsRaw).notifications || {})
+          }
+        };
+      } catch {
+        resolved = defaultPrefs;
+      }
+    }
+    if (savedTheme) resolved.theme = savedTheme;
+    setPrefs(resolved);
+    applyTheme(resolved.theme);
+    setActiveCur(resolved.currency || 'USD');
+    setActivePace(resolved.pace || 'balanced');
 
     // Inject Leaflet
     const lc = document.createElement('link');
@@ -321,10 +609,70 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    localStorage.setItem(THEME_KEY, prefs.theme);
+    applyTheme(prefs.theme);
+  }, [prefs]);
+
+  useEffect(() => {
+    setRankBy('recommended');
+    setRankSection(rankTarget === 'stops' ? 'all' : rankTarget);
+  }, [activeTab, rankTarget]);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [page]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === 'Escape') {
+        if (drawer) { setDrawer(null); setActiveStop(null); }
+        if (resetModal) setResetModal(false);
+        if (dropdownOpen) setDropdownOpen(false);
+        if (deleteModal) setDeleteModal('');
+      }
+      if (e.key === 'ArrowRight' && page==='itinerary') {
+        const next = Math.min(activeDay + 1, itin?.days?.length || 1);
+        switchDay(next);
+      }
+      if (e.key === 'ArrowLeft' && page==='itinerary') {
+        switchDay(Math.max(activeDay - 1, 1));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [drawer, resetModal, activeDay, page, itin, dropdownOpen, deleteModal]);
+
+  useEffect(() => {
+    if (page === 'saved') {
+      setSavedLoading(true);
+      const t = setTimeout(() => setSavedLoading(false), 900);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [page]);
+
+  useEffect(() => {
     if (page === 'chat' && history.length === 0) {
       setTimeout(() => setHistory([{ from:'bot', text: QUESTIONS[0] }]), 400);
     }
   }, [page]);
+
+  useEffect(() => {
+    if (page === 'chat' && qIdx === 0 && chatData.origin && !textInput) {
+      setTextInput(chatData.origin);
+    }
+  }, [page, qIdx, chatData.origin, textInput]);
 
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior:'smooth' }); }, [history, typing]);
 
@@ -475,9 +823,12 @@ export default function App() {
         throw new Error(msg);
       }
       const d = await res.json();
-      const sess = { userId:d.user_id||d.userId, token:d.access_token||d.token, name:d.name, isGuest:false };
+      const sess = { userId:d.user_id||d.userId, token:d.access_token||d.token, name:d.name, email:authForm.email, isGuest:false };
       localStorage.setItem('travelUser', JSON.stringify(sess));
-      setUser(sess); setPage('dashboard');
+      setUser(sess);
+      setProfileName(sess.name || '');
+      showToast('✓ Logged in successfully');
+      navigateTo('dashboard');
     } catch(e) {
       const msg = String(e?.message || 'Authentication failed');
       if (msg.toLowerCase().includes('failed to fetch')) {
@@ -491,12 +842,16 @@ export default function App() {
   const guestLogin = () => {
     const sess = { userId:`gst_${Date.now()}`, token:'', name:'Explorer', isGuest:true };
     sessionStorage.setItem('travelGuest', JSON.stringify(sess));
-    setUser(sess); setPage('dashboard');
+    setUser(sess);
+    setProfileName(sess.name || 'Explorer');
+    navigateTo('dashboard');
   };
 
   const logout = () => {
     localStorage.removeItem('travelUser'); sessionStorage.removeItem('travelGuest');
-    setUser(null); setPage('auth');
+    setUser(null);
+    setDropdownOpen(false);
+    navigateTo('auth');
   };
 
   // ── Chat helpers ──
@@ -569,12 +924,19 @@ export default function App() {
       setLoadProg(100);
       setTimeout(() => setLoading(false), 300);
       const trip = data.trip;
-      setItin(trip);
+      const optimizedTrip = {
+        ...trip,
+        days: (trip.days || []).map(day => ({
+          ...day,
+          stops: nearestNeighborSort((day.stops || []).slice(0, 4))
+        }))
+      };
+      setItin(optimizedTrip);
       setActiveDay(1);
-      setActiveCur(trip.local_currency in EXCHANGE ? trip.local_currency : 'USD');
-      setExpandedDays({ 1:true });
+      setActiveCur(prefs.currency || (trip.local_currency in EXCHANGE ? trip.local_currency : 'USD'));
+      setActivePace(prefs.pace || 'balanced');
       setCompletedStops({});
-      setPage('itinerary');
+      navigateTo('itinerary');
       const lat = trip.center_lat || chatData.destLat;
       const lng = trip.center_lng || chatData.destLng;
       if (lat && lng) fetchWeather(lat, lng).then(setWeather).catch(()=>{});
@@ -585,7 +947,8 @@ export default function App() {
         : s===422 ? 'Couldn\'t understand the destination — be more specific.'
         : s===500 ? 'Travel agents are busy — try again in a moment.'
         : 'Something went wrong. Please try again.';
-      setError({ title:"Couldn't build your itinerary", msg, action: s===401 ? ()=>setPage('auth') : buildIt });
+      showToast('⚠️ API error — retrying...', 'error');
+      setError({ title:"Couldn't build your itinerary", msg, action: s===401 ? ()=>navigateTo('auth') : buildIt });
     }
   };
 
@@ -597,12 +960,26 @@ export default function App() {
   // ── Reset ──
   const startNew = (q=0, force=false) => {
     if (itin && !force) { setPendingReset(q); setResetModal(true); return; }
-    setChatData({ origin:'', destination:'', originLat:null, originLng:null, destLat:null, destLng:null, days:null, comfort_radius:'', vibes:[], group_type:'', budget_level:'', special_requests:'' });
+    setChatData({
+      origin: prefs.defaultOrigin || '',
+      destination:'',
+      originLat:null,
+      originLng:null,
+      destLat:null,
+      destLng:null,
+      days:null,
+      comfort_radius:'',
+      vibes:[...(prefs.defaultVibes || [])],
+      group_type:prefs.defaultGroup || '',
+      budget_level:'',
+      special_requests:''
+    });
     setHistory([]); setQIdx(0); setItin(null); setWeather(null);
     setSugg([]); setError(null); setTextInput(''); setReadyBuild(false);
     setCustomBudget(''); setShowCustomBudget(false);
     setActiveDay(1); setCompletedStops({}); setDrawer(null); setActiveStop(null);
-    setPage('chat');
+    showToast('↺ Trip reset');
+    navigateTo('chat');
   };
 
   const switchDay = (d) => {
@@ -612,6 +989,7 @@ export default function App() {
 
   const toggleStopComplete = (key) => {
     setCompletedStops(p => ({ ...p, [key]: !p[key] }));
+    showToast('✓ Stop marked as visited');
   };
 
   const allDayComplete = (dayNum) => {
@@ -631,6 +1009,7 @@ export default function App() {
   const copyPackingList = () => {
     const unchecked = packingList.filter(i => !checkedPack[i]);
     navigator.clipboard?.writeText(unchecked.join('\n'));
+    showToast('📋 Packing list copied!');
   };
 
   const submitCustomBudget = () => {
@@ -643,24 +1022,72 @@ export default function App() {
     advanceQ(7);
   };
 
-  const parseTravelDistanceKm = (travelText) => {
-    if (!travelText) return null;
-    const match = String(travelText).toLowerCase().match(/(\d+(?:\.\d+)?)\s*km/);
-    if (!match) return null;
-    const km = Number(match[1]);
-    return Number.isFinite(km) ? km : null;
+  const saveProfileName = () => {
+    if (!profileName.trim()) return;
+    const nextUser = { ...(user || {}), name: profileName.trim() };
+    setUser(nextUser);
+    if (nextUser.isGuest) sessionStorage.setItem('travelGuest', JSON.stringify(nextUser));
+    else localStorage.setItem('travelUser', JSON.stringify(nextUser));
+    setProfileNameEdit(false);
+    showToast('✓ Profile updated');
+  };
+
+  const exportMyData = () => {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      user: { name: user?.name, id: user?.userId, isGuest: !!user?.isGuest },
+      savedTrips
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'travelmind-data.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearTripHistory = () => {
+    setSavedTrips([]);
+    setDeleteModal('');
+    showToast('↺ Trip history cleared');
   };
 
   // ─── RENDER ────────────────────────────────────────────────────────────────
   return (
-    <div style={{ minHeight:'100vh', background:'#0F172A', color:'#F1F5F9', fontFamily:'system-ui,-apple-system,sans-serif' }}>
+    <div style={{ minHeight:'100vh', background:'var(--bg-primary)', color:'var(--text-primary)', fontFamily:'system-ui,-apple-system,sans-serif' }}>
       <style>{`
+        :root {
+          --bg-primary: #0F172A;
+          --bg-surface: #1E293B;
+          --bg-elevated: #273549;
+          --text-primary: #F1F5F9;
+          --text-secondary: #94A3B8;
+          --text-muted: #64748B;
+          --border: #334155;
+          --border-subtle: #1E293B;
+          --accent: #6366F1;
+          --accent-cyan: #0EA5E9;
+          --accent-emerald: #10B981;
+          --accent-amber: #F59E0B;
+        }
+        [data-theme="light"] {
+          --bg-primary: #F8FAFC;
+          --bg-surface: #FFFFFF;
+          --bg-elevated: #F1F5F9;
+          --text-primary: #0F172A;
+          --text-secondary: #475569;
+          --text-muted: #94A3B8;
+          --border: #E2E8F0;
+          --border-subtle: #F1F5F9;
+        }
         *{box-sizing:border-box;margin:0;padding:0;}
         body{margin:0;}
         @keyframes ripple{from{transform:scale(0);opacity:0.4;}to{transform:scale(4);opacity:0;}}
         @keyframes bounce{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
         @keyframes slideIn{from{opacity:0;transform:translateX(20px);}to{opacity:1;transform:translateX(0);}}
+        @keyframes slideInRight{from{opacity:0;transform:translateX(24px);}to{opacity:1;transform:translateX(0);}}
         @keyframes slideUp{from{opacity:0;transform:translateY(30px);}to{opacity:1;transform:translateY(0);}}
         @keyframes shimmer{0%{background-position:-200% center;}100%{background-position:200% center;}}
         @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
@@ -678,7 +1105,7 @@ export default function App() {
         .btn-primary:active{transform:scale(0.97);}
         .btn-primary.shimmer-btn{background-size:200% auto;background-image:linear-gradient(135deg,#6366F1 0%,#818CF8 40%,#6366F1 60%,#4F46E5 100%);animation:shimmer 3s linear infinite;}
 
-        .btn-secondary{background:transparent;border:1px solid #334155;color:#94A3B8;padding:10px 20px;border-radius:10px;cursor:pointer;transition:all 0.2s;font-size:14px;}
+        .btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:10px 20px;border-radius:10px;cursor:pointer;transition:all 0.2s;font-size:14px;}
         .btn-secondary:hover{border-color:#6366F1;color:#6366F1;background:rgba(99,102,241,0.06);}
         .btn-secondary:active{transform:scale(0.97);}
 
@@ -701,7 +1128,7 @@ export default function App() {
         .drawer{position:fixed;right:0;top:0;bottom:0;width:400px;background:#1E293B;z-index:401;overflow-y:auto;border-left:1px solid #334155;animation:slideIn 0.3s cubic-bezier(0.32,0.72,0,1);}
         @media(max-width:768px){.drawer{width:100%;right:0;top:auto;height:85vh;border-radius:20px 20px 0 0;border-left:none;border-top:1px solid #334155;animation:slideUp 0.3s cubic-bezier(0.32,0.72,0,1);} .map-panel{height:50vh!important;} .split{grid-template-columns:1fr!important;}}
 
-        input,textarea{background:#1E293B;border:1px solid #334155;color:#F1F5F9;border-radius:10px;padding:12px 14px;font-size:14px;font-family:inherit;width:100%;transition:all 0.2s;outline:none;}
+        input,textarea{background:var(--bg-surface);border:1px solid var(--border);color:var(--text-primary);border-radius:10px;padding:12px 14px;font-size:14px;font-family:inherit;width:100%;transition:all 0.2s;outline:none;}
         input:focus,textarea:focus{border-color:#6366F1;box-shadow:0 0 0 3px rgba(99,102,241,0.15);}
 
         ::-webkit-scrollbar{width:6px;height:6px;}
@@ -727,6 +1154,8 @@ export default function App() {
         .leaflet-popup-tip{background:#1E293B!important;}
         .leaflet-popup-close-button{color:#94A3B8!important;}
       `}</style>
+
+      <div style={{ opacity: pageTransition ? 0 : 1, transition: 'opacity 0.18s ease' }}>
 
       {/* ── AUTH PAGE ── */}
       {page==='auth' && (
@@ -789,11 +1218,38 @@ export default function App() {
           {/* Navbar */}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:48 }}>
             <span style={{ fontSize:20, fontWeight:500 }}>✈️ TravelMind</span>
-            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-              <button className="btn-secondary" style={{ fontSize:13 }} onClick={()=>setPage('saved')}>My Trips</button>
-              <div style={{ width:36, height:36, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:600, cursor:'pointer' }} onClick={logout}>
+            <div style={{ display:'flex', alignItems:'center', gap:12, position:'relative' }} ref={dropdownRef}>
+              <button className="btn-secondary" style={{ fontSize:13 }} onClick={()=>navigateTo('saved')}>My Trips</button>
+              <div style={{ width:36, height:36, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:600, cursor:'pointer' }} onClick={()=>setDropdownOpen(p=>!p)}>
                 {initials(user.name)}
               </div>
+              {dropdownOpen && (
+                <div style={{ position:'absolute', top:52, right:16, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, boxShadow:'0 16px 48px rgba(0,0,0,0.5)', minWidth:220, animation:'fadeUp 0.2s ease', zIndex:300 }}>
+                  <div style={{ display:'flex', gap:10, alignItems:'center', padding:'8px 10px 10px' }}>
+                    <div style={{ width:48, height:48, borderRadius:'50%', background:'linear-gradient(135deg,#6366F1,#0EA5E9)', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:600 }}>{initials(user?.name)}</div>
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontWeight:500, fontSize:14 }}>{user?.name || 'Traveler'}</div>
+                      <div style={{ fontSize:12, color:'#94A3B8', display:'flex', justifyContent:'space-between' }}>
+                        <span>{user?.email || 'user@email.com'}</span><span>{user?.isGuest ? 'Guest' : 'User'}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ borderTop:'1px solid #334155', margin:'4px 0' }} />
+                  {[
+                    ['👤 My Profile', () => navigateTo('profile')],
+                    ['🗺️ My Trips', () => navigateTo('saved')],
+                    ['⚙️ Settings', () => navigateTo('settings')],
+                  ].map(([label, action]) => (
+                    <div key={label} onClick={action} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
+                      {label}
+                    </div>
+                  ))}
+                  <div style={{ borderTop:'1px solid #334155', margin:'4px 0' }} />
+                  <div onClick={logout} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, color:'#F87171', borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
+                    🚪 Sign Out
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -810,7 +1266,7 @@ export default function App() {
               <h3 style={{ fontWeight:500, marginBottom:6 }}>Plan a new trip</h3>
               <p style={{ color:'rgba(255,255,255,0.7)', fontSize:13 }}>Chat with our AI to build your perfect itinerary</p>
             </div>
-            <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, cursor:'pointer' }} onClick={()=>setPage('saved')}>
+            <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, cursor:'pointer' }} onClick={()=>navigateTo('saved')}>
               <div style={{ fontSize:32, marginBottom:12 }}>📚</div>
               <h3 style={{ fontWeight:500, marginBottom:6 }}>My saved trips</h3>
               <p style={{ color:'#64748B', fontSize:13 }}>View and revisit your past itineraries</p>
@@ -830,7 +1286,7 @@ export default function App() {
         <div className="fade-up" style={{ maxWidth:680, margin:'0 auto', padding:'32px 20px', minHeight:'100vh', display:'flex', flexDirection:'column' }}>
           {/* Header */}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
-            <button className="btn-secondary" style={{ padding:'8px 14px', fontSize:13 }} onClick={()=>setPage('dashboard')}>← Back</button>
+            <button className="btn-secondary" style={{ padding:'8px 14px', fontSize:13 }} onClick={()=>navigateTo('dashboard')}>← Back</button>
             <span style={{ color:'#64748B', fontSize:13 }}>{progPct}% complete</span>
           </div>
 
@@ -907,6 +1363,9 @@ export default function App() {
                         </div>
                       ))}
                     </div>
+                  )}
+                  {suggLoad && (
+                    <div style={{ marginTop:8, fontSize:11, color:'#64748B' }}>Searching places...</div>
                   )}
                 </div>
                 <RippleBtn className="btn-primary" onClick={submitText} style={{ width:'100%', marginTop:12 }}>
@@ -994,7 +1453,7 @@ export default function App() {
             {qIdx===5 && !readyBuild && (
               <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
                 {[['🧍','Solo'],['💑','Couple'],['👨‍👩‍👧','Family'],['👫','Friends']].map(([e,g])=>(
-                  <RippleBtn key={g} className="chip" onClick={()=>{
+                  <RippleBtn key={g} className={`chip${chatData.group_type===g?' on':''}`} onClick={()=>{
                     setChatData(p=>({...p,group_type:g}));
                     addMsg('user',`${e} ${g}`);
                     advanceQ(6);
@@ -1012,7 +1471,7 @@ export default function App() {
                       key={opt.value}
                       onClick={() => {
                         setChatData(p => ({...p, budget_level: opt.value}));
-                        addMsg('user', `${opt.icon} ${opt.label} (${opt.range}/day)`);
+                        addMsg('user', `${opt.icon} ${opt.label} — ${opt.range}/day (${opt.inr_range})`);
                         advanceQ(7);
                       }}
                       style={{
@@ -1045,10 +1504,15 @@ export default function App() {
                         marginBottom: 10,
                       }}>{opt.icon}</div>
                       <div style={{ fontWeight: 500, fontSize: 15, marginBottom: 2 }}>{opt.label}</div>
-                      <div style={{ color: opt.color, fontSize: 13, fontWeight: 500, marginBottom: 6 }}>{opt.range}/day</div>
-                      <div style={{ color: '#64748B', fontSize: 11, lineHeight: 1.5 }}>{opt.examples}</div>
+                      <div style={{ color: opt.color, fontSize:14, fontWeight:500 }}>{opt.range}/day</div>
+                      <div style={{ color:'#64748B', fontSize:11, marginBottom:6 }}>≈ {opt.inr_range}</div>
+                      <div style={{ color:'#475569', fontSize:11, lineHeight:1.5 }}>{opt.examples}</div>
                     </div>
                   ))}
+                </div>
+
+                <div style={{ marginTop:14, padding:'10px 14px', background:'rgba(99,102,241,0.06)', border:'1px solid rgba(99,102,241,0.15)', borderRadius:10, fontSize:12, color:'#94A3B8' }}>
+                  💡 All hotel, food and activity costs in your itinerary will be filtered to stay within this daily budget
                 </div>
 
                 <button
@@ -1063,7 +1527,7 @@ export default function App() {
                   <div style={{ display:'flex', gap:8, marginTop:10 }}>
                     <input
                       type="number"
-                      placeholder="Daily budget in USD"
+                      placeholder="Daily budget in USD (e.g. 15)"
                       value={customBudget}
                       onChange={e => setCustomBudget(e.target.value)}
                       min={1}
@@ -1074,6 +1538,11 @@ export default function App() {
                       Set
                     </button>
                   </div>
+                )}
+                {showCustomBudget && (
+                  <p style={{ fontSize:11, color:'#64748B', marginTop:4 }}>
+                    ≈ ₹{Math.round((customBudget || 0) * 83.5).toLocaleString('en-IN')}/day at current rates
+                  </p>
                 )}
               </div>
             )}
@@ -1125,16 +1594,33 @@ export default function App() {
                 <strong style={{ color:'#F1F5F9' }}>{itin.destination}</strong>
               </span>
             </div>
-            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }} ref={dropdownRef}>
               {weather?.current_weather && (
                 <span style={{ background:'#1E293B', padding:'4px 10px', borderRadius:20, fontSize:12, color:'#94A3B8' }}>
                   {wxFor(weather.current_weather.weathercode)?.e} {Math.round(weather.current_weather.temperature)}°C
                 </span>
               )}
-              <button className="btn-secondary" style={{ fontSize:13, padding:'6px 12px' }} onClick={()=>setPage('saved')}>My Trips</button>
-              <div style={{ width:32, height:32, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, cursor:'pointer' }} onClick={logout}>
+              <button className="btn-secondary" style={{ fontSize:13, padding:'6px 12px' }} onClick={()=>navigateTo('saved')}>My Trips</button>
+              <div style={{ width:32, height:32, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, cursor:'pointer' }} onClick={()=>setDropdownOpen(p=>!p)}>
                 {initials(user?.name)}
               </div>
+              {dropdownOpen && (
+                <div style={{ position:'absolute', top:52, right:16, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, boxShadow:'0 16px 48px rgba(0,0,0,0.5)', minWidth:220, animation:'fadeUp 0.2s ease', zIndex:300 }}>
+                  {[
+                    ['👤 My Profile', () => navigateTo('profile')],
+                    ['🗺️ My Trips', () => navigateTo('saved')],
+                    ['⚙️ Settings', () => navigateTo('settings')],
+                  ].map(([label, action]) => (
+                    <div key={label} onClick={action} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
+                      {label}
+                    </div>
+                  ))}
+                  <div style={{ borderTop:'1px solid #334155', margin:'4px 0' }} />
+                  <div onClick={logout} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, color:'#F87171', borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
+                    🚪 Sign Out
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1148,7 +1634,7 @@ export default function App() {
 
                 {/* Mood board pills */}
                 <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:12 }}>
-                  {[`✈️ ${itin.duration_days} Days`, `💰 ${SYM[activeCur]}${conv(grandTotal,activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || null) : null, `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
+                  {[`✈️ ${itin.duration_days} Days`, `💰 ${SYM[activeCur]}${conv(grandTotal,activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || null) : null, budgetPillMap[itin.budget_level], `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
                     <span key={i} style={{ background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.2)', color:'#A5B4FC', fontSize:11, padding:'4px 10px', borderRadius:20 }}>{pill}</span>
                   ))}
                 </div>
@@ -1165,12 +1651,13 @@ export default function App() {
                 </div>
 
                 {/* Currency */}
-                <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:12 }}>
-                  {Object.keys(EXCHANGE).map(c=>(
-                    <RippleBtn key={c} className={`chip${activeCur===c?' on':''}`} onClick={()=>setActiveCur(c)} style={{ fontSize:11, padding:'5px 12px' }}>
-                      {SYM[c]} {c}
-                    </RippleBtn>
-                  ))}
+                <div style={{ marginBottom:12, maxWidth:220 }}>
+                  <CustomDropdown
+                    label="Currency"
+                    value={activeCur}
+                    onChange={(c) => { setActiveCur(c); setPrefs(p => ({ ...p, currency:c })); }}
+                    options={Object.keys(EXCHANGE).map(c => ({ value:c, label:`${SYM[c]} ${c}` }))}
+                  />
                 </div>
 
                 {/* Tabs */}
@@ -1185,6 +1672,43 @@ export default function App() {
               </div>
 
               <div style={{ flex:1, overflowY:'auto', padding:'16px 20px 100px' }}>
+
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10, padding:'8px 12px', background:'rgba(99,102,241,0.05)', border:'1px solid rgba(99,102,241,0.15)', borderRadius:10 }}>
+                  <div>
+                    <span style={{ fontSize:13, fontWeight:500 }}>🎯 Comfort zone filter</span>
+                    <span style={{ fontSize:11, color:'#64748B', marginLeft:8 }}>
+                      {comfortFilter ? 'Showing only items within your budget & radius' : 'Showing all items'}
+                    </span>
+                  </div>
+                  <div onClick={() => setComfortFilter(p => !p)} style={{ width:44, height:24, borderRadius:12, cursor:'pointer', background: comfortFilter ? '#6366F1' : '#334155', position:'relative', transition:'background 0.3s', flexShrink:0 }}>
+                    <div style={{ width:18, height:18, borderRadius:'50%', background:'white', position:'absolute', top:3, left: comfortFilter ? 23 : 3, transition:'left 0.25s ease', boxShadow:'0 1px 4px rgba(0,0,0,0.3)' }}/>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom:14, padding:'10px 12px', background:'#1E293B', border:'1px solid #334155', borderRadius:12 }}>
+                  <div style={{ fontSize:12, color:'#94A3B8', marginBottom:8 }}>Sort by:</div>
+                  <div style={{ display:'flex', gap:8, overflowX:'auto', whiteSpace:'nowrap' }}>
+                    {relevantRanks.map((r) => (
+                      <button
+                        key={r.value}
+                        onClick={() => setRankBy(r.value)}
+                        style={{
+                          padding:'6px 14px',
+                          fontSize:12,
+                          borderRadius:20,
+                          border:`1px solid ${rankBy===r.value ? '#6366F1' : '#334155'}`,
+                          background: rankBy===r.value ? '#6366F1' : 'transparent',
+                          color: rankBy===r.value ? '#FFFFFF' : '#64748B',
+                          cursor:'pointer',
+                          fontFamily:'inherit',
+                          flexShrink:0,
+                        }}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
                 {/* Weather strip */}
                 {weather?.daily && (
@@ -1229,8 +1753,8 @@ export default function App() {
                       </div>
                       <p style={{ fontWeight:500, fontSize:16, marginBottom:4 }}>{currentDayData?.title}</p>
                       <p style={{ color:'#64748B', fontSize:12 }}>
-                        {dayStops.length} stops • ~{dayStops.reduce((a,s)=>a+s._dur,0)} min
-                        {' • '}{Object.keys(completedStops).filter(k=>k.startsWith(`${activeDay}-`)&&completedStops[k]).length} of {dayStops.length} visited
+                        {rerankedStops.length} stops • ~{rerankedStops.reduce((a,s)=>a+s._dur,0)} min
+                        {' • '}{Object.keys(completedStops).filter(k=>k.startsWith(`${activeDay}-`)&&completedStops[k]).length} of {rerankedStops.length} visited
                       </p>
                       {weatherDay(activeDay-1)?.rain > 70 && (
                         <div style={{ marginTop:10, background:'rgba(245,158,11,0.1)', border:'1px solid rgba(245,158,11,0.3)', borderRadius:8, padding:'8px 12px', fontSize:12, color:'#FCD34D' }}>
@@ -1242,19 +1766,19 @@ export default function App() {
                     {/* Route summary */}
                     <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:12, padding:'14px 16px', marginBottom:16, fontSize:13 }}>
                       <div style={{ fontWeight:500, marginBottom:10, color:'#94A3B8', fontSize:11, textTransform:'uppercase', letterSpacing:0.8 }}>📍 Today's Route</div>
-                      {dayStops.map((s,i)=>(
+                      {rerankedStops.map((s,i)=>(
                         <div key={i}>
                           <div style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 0' }}>
                             <div style={{ width:22, height:22, borderRadius:'50%', background:DAY_COLORS[(activeDay-1)%DAY_COLORS.length], display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:600, color:'white', flexShrink:0 }}>{i+1}</div>
                             <span style={{ color:'#F1F5F9', flex:1 }}>{s.name}</span>
                             <span style={{ color:'#64748B', fontSize:11 }}>{s._arrival}</span>
                           </div>
-                          {i<dayStops.length-1 && <div style={{ padding:'4px 0 4px 11px', borderLeft:'2px dashed #334155', marginLeft:10, fontSize:11, color:'#64748B' }}>
+                          {i<rerankedStops.length-1 && <div style={{ padding:'4px 0 4px 11px', borderLeft:'2px dashed #334155', marginLeft:10, fontSize:11, color:'#64748B' }}>
                             {s.travel_to_next || '15 min'}
                           </div>}
                         </div>
                       ))}
-                      <a href={`https://www.google.com/maps/dir/${dayStops.filter(s=>s.lat&&s.lng).map(s=>`${s.lat},${s.lng}`).join('/')}`}
+                      <a href={`https://www.google.com/maps/dir/${rerankedStops.filter(s=>s.lat&&s.lng).map(s=>`${s.lat},${s.lng}`).join('/')}`}
                         target="_blank" rel="noreferrer"
                         style={{ display:'block', textAlign:'center', marginTop:12, padding:'8px', background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:8, color:'#A5B4FC', fontSize:12, textDecoration:'none' }}>
                         🗺️ Navigate Full Route in Google Maps ↗
@@ -1262,9 +1786,16 @@ export default function App() {
                     </div>
 
                     {/* Stop cards */}
+                    {rerankedStops.length === 0 ? (
+                      <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
+                        <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
+                        <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
+                        <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
+                      </div>
+                    ) : (
                     <div style={{ position:'relative' }}>
                       <div style={{ position:'absolute', left:20, top:0, bottom:0, width:2, background:`linear-gradient(180deg,${DAY_COLORS[(activeDay-1)%DAY_COLORS.length]},transparent)`, opacity:0.4 }}/>
-                      {dayStops.map((stop, i) => {
+                      {rerankedStops.map((stop, i) => {
                         const key = `${activeDay}-${i}`;
                         const done = completedStops[key];
                         const isActive = activeStop===key;
@@ -1286,7 +1817,24 @@ export default function App() {
                                     <div style={{ fontSize:11, color:'#64748B', marginTop:2 }}>{stop._arrival} • {stop._dur} min</div>
                                   </div>
                                 </div>
-                                <QualityBadge rating={stop.rating}/>
+                                <div style={{ display:'flex', alignItems:'center', gap:6, marginLeft:'auto' }}>
+                                  <QualityBadge rating={stop.rating}/>
+                                  {(() => {
+                                    const rankReason = {
+                                      price_low: `💰 ${SYM[activeCur]}${conv(stop.cost_usd, activeCur)}`,
+                                      price_high: `💰 ${SYM[activeCur]}${conv(stop.cost_usd, activeCur)}`,
+                                      rating: stop.rating ? `🌟 ${stop.rating}` : null,
+                                      distance: stop._distFromPrev ? `📍 ${stop._distFromPrev}km` : null,
+                                      duration: `⏱ ${stop._dur}min`,
+                                      budget_fit: stop._withinBudget ? '✓ Fits budget' : '⚠️ Over budget',
+                                    };
+                                    return rankBy !== 'recommended' && rankReason[rankBy] ? (
+                                      <span style={{ background:'rgba(99,102,241,0.1)', color:'#A5B4FC', fontSize:10, padding:'2px 8px', borderRadius:20 }}>
+                                        {rankReason[rankBy]}
+                                      </span>
+                                    ) : null;
+                                  })()}
+                                </div>
                               </div>
 
                               <p style={{ color:'#94A3B8', fontSize:13, marginBottom:8, lineHeight:1.5 }}>{stop.description}</p>
@@ -1323,21 +1871,27 @@ export default function App() {
                             </div>
 
                             {/* Navigation connector */}
-                            {i<dayStops.length-1 && (
+                            {i<rerankedStops.length-1 && (
                               <div className="nav-connector" style={{ marginLeft:8 }}>
                                 <span style={{ paddingLeft:24 }}>
                                   {['🚗','🚶','🚇'][[['drive','walk','transit'].indexOf(transportModes[`${activeDay}-${i}`]||'drive')]]} {stop.travel_to_next||'~15 min'}
+                                  {stop._distFromPrev && (
+                                    <span style={{ color:'#64748B', fontSize:11, marginLeft:8 }}>
+                                      📏 {stop._distFromPrev} km from previous stop
+                                    </span>
+                                  )}
                                   {' '}
                                   {['drive','walk','transit'].map(m=>(
                                     <button key={m} onClick={()=>setTransportModes(p=>({...p,[`${activeDay}-${i}`]:m}))} style={{ background:'none', border:`1px solid ${(transportModes[`${activeDay}-${i}`]||'drive')===m?'#6366F1':'#334155'}`, color:(transportModes[`${activeDay}-${i}`]||'drive')===m?'#6366F1':'#64748B', borderRadius:20, padding:'2px 8px', fontSize:10, cursor:'pointer', fontFamily:'inherit', marginLeft:4, transition:'all 0.2s' }}>
                                       {m==='drive'?'🚗':m==='walk'?'🚶':'🚇'} {m}
                                     </button>
                                   ))}
-                                  {itin.comfort_radius === 'walkable' && (() => {
-                                    const km = parseTravelDistanceKm(stop.travel_to_next);
-                                    return km && km > 5 ? (
+                                  {(() => {
+                                    const maxKm = RADIUS_KM[itin?.comfort_radius || 'flexible'];
+                                    const isOverRadius = Number(stop?._distFromPrev) > maxKm;
+                                    return isOverRadius ? (
                                       <span style={{ display:'inline-block', marginLeft:8, background:'rgba(245,158,11,0.12)', border:'1px solid rgba(245,158,11,0.45)', color:'#FCD34D', borderRadius:8, padding:'2px 8px', fontSize:10 }}>
-                                        ⚠️ Further than your comfort range
+                                        ⚠️ Further than your comfort range ({maxKm}km)
                                       </span>
                                     ) : null;
                                   })()}
@@ -1348,54 +1902,126 @@ export default function App() {
                         );
                       })}
                     </div>
+                    )}
 
                     {/* Food section */}
-                    {currentDayData?.food?.length > 0 && (
+                    {(rankedFood.length > 0 || (currentDayData?.food?.length || 0) > 0) && (
                       <div style={{ marginTop:24 }}>
                         <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1, marginBottom:12 }}>🍜 What to Eat Today</h4>
-                        <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                          {currentDayData.food.map((f,i)=>(
-                            <div key={i} className="food-card">
-                              <div style={{ fontSize:28, marginBottom:8 }}>{f.emoji}</div>
-                              <div style={{ fontWeight:500, fontSize:14, marginBottom:4 }}>{f.name}</div>
-                              <div style={{ color:'#64748B', fontSize:11, marginBottom:8 }}>{f.restaurant}</div>
-                              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                                <span style={{ color:'#F59E0B', fontWeight:500 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
-                                <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>{f.meal_type}</span>
-                              </div>
-                              {f.rating && <div style={{ fontSize:11, color:'#64748B', marginTop:6 }}>{'★'.repeat(Math.round(f.rating))} {f.rating}</div>}
-                            </div>
-                          ))}
+                        <div style={{ fontSize:12, color:'#64748B', marginBottom:10 }}>
+                          🍜 Budget cap per meal: {SYM[activeCur]}{conv(FOOD_CAPS[itin?.budget_level || 'Relaxed'], activeCur)} · Sorted by: {rankOptions.find(r=>r.value===rankBy)?.label}
                         </div>
+                        {displayedFood.length === 0 ? (
+                          <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
+                            <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
+                            <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
+                            <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
+                          </div>
+                        ) : (
+                          <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
+                            {displayedFood.map((f,i)=>(
+                              <div key={i} className="food-card" style={{ position:'relative' }}>
+                                <div style={{ position:'absolute', top:8, right:8 }} onMouseEnter={() => setShowTooltip(`food-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
+                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 6px', borderRadius:20 }}>#{i+1}</div>
+                                  {showTooltip === `food-${i}` && i === 0 && (
+                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', right:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
+                                      {getRankReason(f, rankBy, 'food')}
+                                    </div>
+                                  )}
+                                </div>
+                                <div style={{ fontSize:28, marginBottom:8 }}>{f.emoji}</div>
+                                <div style={{ fontWeight:500, fontSize:14, marginBottom:4 }}>{f.name}</div>
+                                <div style={{ color:'#64748B', fontSize:11, marginBottom:8 }}>{f.restaurant}</div>
+                                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+                                  <span style={{ color:'#F59E0B', fontWeight:500 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
+                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>{f.meal_type}</span>
+                                </div>
+                                {f._withinBudget ? (
+                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>✓ Within budget</span>
+                                ) : (
+                                  <span style={{ background:'rgba(245,158,11,0.1)', color:'#FCD34D', fontSize:10, padding:'2px 8px', borderRadius:20 }}>⚠️ Above budget</span>
+                                )}
+                                {f.rating && <div style={{ fontSize:11, color:'#64748B', marginTop:6 }}>{'★'.repeat(Math.round(f.rating))} {f.rating}</div>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {/* Hotels */}
-                    {currentDayData?.hotels?.length > 0 && (
+                    {(rankedHotels.length > 0 || (currentDayData?.hotels?.length || 0) > 0) && (
                       <div style={{ marginTop:24 }}>
                         <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1, marginBottom:12 }}>🏨 Where to Stay Tonight</h4>
-                        <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                          {currentDayData.hotels.map((h,i)=>(
-                            <div key={i} className={`hotel-card${h.recommended?' recommended':''}`}>
-                              {h.recommended && (
-                                <div style={{ position:'absolute', top:-10, left:12, background:'#6366F1', color:'white', fontSize:10, padding:'3px 10px', borderRadius:20, fontWeight:500 }}>Best Value</div>
-                              )}
-                              <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
-                              <div style={{ color:'#F59E0B', fontSize:14, marginBottom:8 }}>{'★'.repeat(h.stars||3)}</div>
-                              <div style={{ fontSize:22, fontWeight:500, marginBottom:6 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:12, color:'#64748B', fontWeight:400 }}>/night</span></div>
-                              <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
-                                {(h.amenities||[]).slice(0,3).map((a,ai)=>(
-                                  <span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'3px 8px', borderRadius:8 }}>{a}</span>
-                                ))}
-                              </div>
-                              {h.distance_from_last_stop && <div style={{ fontSize:11, color:'#64748B', marginBottom:10 }}>📍 {h.distance_from_last_stop}</div>}
-                              <a href={h.booking_url||`https://www.google.com/search?q=${encodeURIComponent(h.name)}`} target="_blank" rel="noreferrer"
-                                style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none', fontWeight:500 }}>
-                                Book Now ↗
-                              </a>
-                            </div>
-                          ))}
+                        <div style={{ fontSize:12, color:'#64748B', marginBottom:8 }}>
+                          🎯 Showing hotels for {itin?.budget_level || 'Relaxed'} budget · {HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.label}
                         </div>
+                        {displayedHotels.length === 0 ? (
+                          <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
+                            <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
+                            <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
+                            <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
+                          </div>
+                        ) : (
+                          <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
+                            {displayedHotels.map((h,i)=>(
+                              <div key={i} className={`hotel-card${h.recommended?' recommended':''}`} style={{ position:'relative' }}>
+                                <div style={{ position:'absolute', top:10, left:12 }} onMouseEnter={() => setShowTooltip(`hotel-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
+                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 8px', borderRadius:20, fontWeight:600 }}>#{i + 1}</div>
+                                  {showTooltip === `hotel-${i}` && i === 0 && (
+                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', left:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
+                                      {getRankReason(h, rankBy, 'hotel')}
+                                    </div>
+                                  )}
+                                </div>
+                                {h.recommended && (
+                                  <div style={{ position:'absolute', top:-10, right:12, background:'#6366F1', color:'white', fontSize:10, padding:'3px 10px', borderRadius:20, fontWeight:500 }}>Best Value</div>
+                                )}
+                                {h._withinBudget ? (
+                                  <div style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8, marginTop:22 }}>✓ Within your budget</div>
+                                ) : (
+                                  <div style={{ background:'rgba(245,158,11,0.12)', color:'#FCD34D', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8, marginTop:22 }}>⚠️ Above your budget</div>
+                                )}
+                                <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
+                                <div style={{ color:'#F59E0B', fontSize:14, marginBottom:8 }}>{'★'.repeat(h.stars||3)}</div>
+                                <div style={{ fontSize:22, fontWeight:500, marginBottom:6 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:12, color:'#64748B', fontWeight:400 }}>/night</span></div>
+
+                                {(rankBy === 'budget_fit' || rankBy === 'recommended') && (
+                                  <div style={{ marginBottom:10 }}>
+                                    <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'#64748B', marginBottom:4 }}>
+                                      <span>Budget fit</span>
+                                      <span style={{ color: h._withinBudget ? '#10B981' : '#F87171' }}>
+                                        {(() => {
+                                          const cap = HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.max || 9999;
+                                          const fitPct = Math.min(100, Math.round((1 - ((h._price || 0) / cap)) * 100));
+                                          return h._withinBudget ? `${fitPct}% under cap` : 'Over budget';
+                                        })()}
+                                      </span>
+                                    </div>
+                                    <div style={{ height:3, borderRadius:999, background:'#334155' }}>
+                                      <div style={{ height:'100%', borderRadius:999, width:`${(() => {
+                                        const cap = HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.max || 9999;
+                                        const fitPct = Math.min(100, Math.round((1 - ((h._price || 0) / cap)) * 100));
+                                        return Math.max(0, fitPct);
+                                      })()}%`, background: h._withinBudget ? '#10B981' : '#F87171', transition:'width 0.4s ease' }}/>
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
+                                  {(h.amenities||[]).slice(0,3).map((a,ai)=>(
+                                    <span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'3px 8px', borderRadius:8 }}>{a}</span>
+                                  ))}
+                                </div>
+                                {h.distance_from_last_stop && <div style={{ fontSize:11, color:'#64748B', marginBottom:10 }}>📍 {h.distance_from_last_stop}</div>}
+                                <a href={h.booking_url||`https://www.google.com/search?q=${encodeURIComponent(h.name)}`} target="_blank" rel="noreferrer"
+                                  style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none', fontWeight:500 }}>
+                                  Book Now ↗
+                                </a>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1404,49 +2030,100 @@ export default function App() {
                 {/* ── HOTELS TAB ── */}
                 {activeTab==='hotels' && (
                   <div>
-                    {itin.days?.map(day=>(
-                      <div key={day.day} style={{ marginBottom:24 }}>
-                        <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1, marginBottom:12 }}>Day {day.day} — {day.title}</h4>
-                        <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                          {(day.hotels||[]).map((h,i)=>(
-                            <div key={i} className={`hotel-card${h.recommended?' recommended':''}`} style={{ minWidth:210 }}>
-                              {h.recommended && <div style={{ position:'absolute', top:-10, left:12, background:'#6366F1', color:'white', fontSize:10, padding:'3px 10px', borderRadius:20, fontWeight:500 }}>Best Value</div>}
-                              <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
-                              <div style={{ color:'#F59E0B', fontSize:13, marginBottom:6 }}>{'★'.repeat(h.stars||3)}</div>
-                              <div style={{ fontSize:20, fontWeight:500, marginBottom:8 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:11, color:'#64748B' }}>/night</span></div>
-                              <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:10 }}>
-                                {(h.amenities||[]).map((a,ai)=><span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'2px 7px', borderRadius:6 }}>{a}</span>)}
-                              </div>
-                              <a href={h.booking_url||'#'} target="_blank" rel="noreferrer" style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none' }}>Book Now ↗</a>
-                            </div>
-                          ))}
-                        </div>
+                    <div style={{ fontSize:12, color:'#64748B', marginBottom:10 }}>
+                      🎯 Showing hotels for {itin?.budget_level || 'Relaxed'} budget · {HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.label}
+                    </div>
+                    {allHotels.length === 0 ? (
+                      <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
+                        <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
+                        <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
+                        <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
                       </div>
-                    ))}
+                    ) : (
+                      <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
+                        {allHotels.map((h,i)=>(
+                          <div key={`${h.name}-${h._day}-${i}`} className={`hotel-card${h.recommended?' recommended':''}`} style={{ minWidth:220, position:'relative' }}>
+                            <div style={{ position:'absolute', top:10, left:12 }} onMouseEnter={() => setShowTooltip(`hotel-all-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
+                              <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 8px', borderRadius:20, fontWeight:600 }}>#{i+1}</div>
+                              {showTooltip === `hotel-all-${i}` && i === 0 && (
+                                <div style={{ position:'absolute', bottom:'calc(100% + 6px)', left:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
+                                  {getRankReason(h, rankBy, 'hotel')}
+                                </div>
+                              )}
+                            </div>
+                            <div style={{ fontSize:10, color:'#64748B', marginBottom:6, marginTop:18 }}>Day {h._day} · {h._dayTitle}</div>
+                            <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
+                            <div style={{ color:'#F59E0B', fontSize:13, marginBottom:6 }}>{'★'.repeat(h.stars||3)} {h.rating ? `${h.rating}` : ''}</div>
+                            <div style={{ fontSize:20, fontWeight:500, marginBottom:8 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:11, color:'#64748B' }}>/night</span></div>
+                            <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:10 }}>
+                              {(h.amenities||[]).map((a,ai)=><span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'2px 7px', borderRadius:6 }}>{a}</span>)}
+                            </div>
+                            {h._withinBudget ? (
+                              <div style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8 }}>✓ Within your budget</div>
+                            ) : (
+                              <div style={{ background:'rgba(245,158,11,0.12)', color:'#FCD34D', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8 }}>⚠️ Above your budget</div>
+                            )}
+                            <a href={h.booking_url||'#'} target="_blank" rel="noreferrer" style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none' }}>Book Now ↗</a>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* ── FOOD TAB ── */}
                 {activeTab==='food' && (
                   <div>
-                    {itin.days?.map(day=>(
-                      <div key={day.day} style={{ marginBottom:24 }}>
-                        <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1, marginBottom:12 }}>Day {day.day} — {day.title}</h4>
-                        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                          {(day.food||[]).map((f,i)=>(
-                            <div key={i} className="food-card" style={{ minWidth:'unset' }}>
-                              <div style={{ fontSize:24, marginBottom:6 }}>{f.emoji}</div>
-                              <div style={{ fontWeight:500, fontSize:13, marginBottom:2 }}>{f.name}</div>
-                              <div style={{ color:'#64748B', fontSize:11, marginBottom:6 }}>{f.restaurant}</div>
-                              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                                <span style={{ color:'#F59E0B', fontWeight:500, fontSize:13 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
-                                <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 7px', borderRadius:20 }}>{f.meal_type}</span>
+                    <div style={{ fontSize:12, color:'#64748B', marginBottom:10 }}>
+                      🍜 Budget cap per meal: {SYM[activeCur]}{conv(FOOD_CAPS[itin?.budget_level || 'Relaxed'], activeCur)} · Sorted by: {rankOptions.find(r=>r.value===rankBy)?.label}
+                    </div>
+                    {foodByMeal.map(({ mealType, items }) => {
+                      if (!items.length) return null;
+                      return (
+                        <div key={mealType} style={{ marginBottom:20 }}>
+                          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+                            <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1 }}>{mealType}</h4>
+                            <span style={{ fontSize:11, color:'#64748B' }}>{items.length} options</span>
+                          </div>
+                          <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:6 }}>
+                            {items.map((f, i) => (
+                              <div key={`${mealType}-${f.name}-${i}`} className="food-card" style={{ minWidth:210, position:'relative' }}>
+                                <div style={{ position:'absolute', top:8, right:8 }} onMouseEnter={() => setShowTooltip(`food-all-${mealType}-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
+                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 6px', borderRadius:20 }}>#{i+1}</div>
+                                  {showTooltip === `food-all-${mealType}-${i}` && i === 0 && (
+                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', right:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
+                                      {getRankReason(f, rankBy, 'food')}
+                                    </div>
+                                  )}
+                                </div>
+                                <div style={{ fontSize:10, color:'#64748B', marginBottom:6 }}>Day {f._day}</div>
+                                <div style={{ fontSize:24, marginBottom:6 }}>{f.emoji}</div>
+                                <div style={{ fontWeight:500, fontSize:13, marginBottom:2 }}>{f.name}</div>
+                                <div style={{ color:'#64748B', fontSize:11, marginBottom:6 }}>{f.restaurant}</div>
+                                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                                  <span style={{ color:'#F59E0B', fontWeight:500, fontSize:13 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
+                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 7px', borderRadius:20 }}>{f.meal_type}</span>
+                                </div>
+                                <div style={{ marginTop:8 }}>
+                                  {f._withinBudget ? (
+                                    <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>✓ Within budget</span>
+                                  ) : (
+                                    <span style={{ background:'rgba(245,158,11,0.1)', color:'#FCD34D', fontSize:10, padding:'2px 8px', borderRadius:20 }}>⚠️ Above budget</span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          ))}
+                            ))}
+                          </div>
                         </div>
+                      );
+                    })}
+                    {foodByMeal.every(({ items }) => items.length === 0) && (
+                      <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
+                        <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
+                        <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
+                        <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
 
@@ -1472,6 +2149,9 @@ export default function App() {
 
               {/* Cost summary — sticky footer */}
               <div style={{ borderTop:'1px solid #1E293B', padding:'14px 20px', background:'rgba(15,23,42,0.9)', backdropFilter:'blur(8px)' }}>
+                <div style={{ fontSize:11, color:'#64748B', marginBottom:8 }}>
+                  ← → Arrow keys to switch days • Esc to close
+                </div>
                 <div style={{ display:'flex', gap:8, marginBottom:10 }}>
                   {[['🏨','Hotels',totalCost.hotels],['🍜','Food',totalCost.food],['🎯','Activities',totalCost.activities],['🚗','Transport',totalCost.transport]].map(([e,l,v])=>(
                     <div key={l} style={{ flex:1, textAlign:'center' }}>
@@ -1531,9 +2211,9 @@ export default function App() {
                   <span style={{ color:DAY_COLORS[(activeDay-1)%DAY_COLORS.length] }}>●</span>
                   <span>Day {activeDay}</span>
                   <span style={{ color:'#334155' }}>•</span>
-                  <span>{dayStops.length} stops</span>
+                  <span>{rerankedStops.length} stops</span>
                   <span style={{ color:'#334155' }}>•</span>
-                  <span>~{Math.round(dayStops.reduce((a,s)=>a+s._dur,0)/60*10)/10}h</span>
+                  <span>~{Math.round(rerankedStops.reduce((a,s)=>a+s._dur,0)/60*10)/10}h</span>
                 </div>
               </div>
             </div>
@@ -1625,24 +2305,222 @@ export default function App() {
         </>
       )}
 
+      {/* ── PROFILE PAGE ── */}
+      {page==='profile' && user && (
+        <div className="fade-up" style={{ maxWidth:760, margin:'0 auto', padding:'40px 20px' }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
+            <h1 style={{ fontSize:28, fontWeight:500 }}>My Profile</h1>
+            <button className="btn-secondary" onClick={()=>navigateTo('dashboard')}>← Back</button>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:18, padding:22, marginBottom:16 }}>
+            <div style={{ display:'flex', gap:16, alignItems:'center' }}>
+              <div style={{ width:72, height:72, borderRadius:'50%', background:'linear-gradient(135deg,#6366F1,#0EA5E9)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:24, fontWeight:600 }}>
+                {initials(user?.name)}
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  {profileNameEdit ? (
+                    <input value={profileName} onChange={(e)=>setProfileName(e.target.value)} style={{ maxWidth:280 }} />
+                  ) : (
+                    <h2 style={{ fontSize:22, fontWeight:500 }}>{user?.name || 'Traveler'}</h2>
+                  )}
+                  <button onClick={() => profileNameEdit ? saveProfileName() : setProfileNameEdit(true)} style={{ border:'1px solid var(--border)', background:'transparent', color:'var(--text-secondary)', borderRadius:8, padding:'5px 10px', cursor:'pointer' }}>
+                    {profileNameEdit ? 'Save' : '✏️'}
+                  </button>
+                </div>
+                <p style={{ color:'var(--text-secondary)', fontSize:14 }}>{user?.email || 'user@email.com'}</p>
+                <p style={{ color:'var(--text-muted)', fontSize:12, marginTop:4 }}>Member since {formatDate(user?.created_at || Date.now())}</p>
+              </div>
+              {user?.isGuest && <span style={{ background:'rgba(245,158,11,0.1)', color:'#FCD34D', border:'1px solid rgba(245,158,11,0.4)', borderRadius:20, padding:'4px 10px', fontSize:12 }}>Guest</span>}
+            </div>
+          </div>
+
+          {user?.isGuest && (
+            <div style={{ background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:12, padding:'12px 16px', marginBottom:16, display:'flex', justifyContent:'space-between', alignItems:'center', gap:10 }}>
+              <span style={{ color:'#A5B4FC', fontSize:13 }}>Create a free account to save trips and unlock all features</span>
+              <button className="btn-primary" style={{ padding:'8px 12px', fontSize:13 }} onClick={()=>navigateTo('auth')}>Register Now →</button>
+            </div>
+          )}
+
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4, minmax(0, 1fr))', gap:10, marginBottom:16 }}>
+            {[
+              ['✈️ Trips Made', profileStats.trips],
+              ['📍 Stops Visited', profileStats.stops],
+              ['🌍 Countries Explored', profileStats.countries],
+              ['💰 Saved Amount', `$${profileStats.saved}`],
+            ].map(([label, val]) => (
+              <div key={label} style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:12, padding:12 }}>
+                <div style={{ color:'var(--text-muted)', fontSize:11, marginBottom:6 }}>{label}</div>
+                <div style={{ fontSize:18, fontWeight:600 }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:16, marginBottom:16 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+              <h3 style={{ fontSize:16, fontWeight:500 }}>Recent Trips</h3>
+              <button className="btn-secondary" style={{ fontSize:12, padding:'6px 10px' }} onClick={()=>navigateTo('saved')}>View All</button>
+            </div>
+            <div style={{ display:'flex', gap:10, overflowX:'auto' }}>
+              {recentTrips.length ? recentTrips.map((trip) => (
+                <div key={trip.id} style={{ minWidth:220, background:'var(--bg-elevated)', border:'1px solid var(--border)', borderRadius:12, padding:12 }}>
+                  <div style={{ fontSize:14, fontWeight:500 }}>{trip.origin} → {trip.destination}</div>
+                  <div style={{ color:'var(--text-muted)', fontSize:12, marginTop:4 }}>{trip.duration_days} days</div>
+                  <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:8 }}>
+                    {(trip.vibes || []).slice(0, 3).map(v => <span key={v} style={{ fontSize:10, color:'#A5B4FC', background:'rgba(99,102,241,0.1)', borderRadius:20, padding:'2px 8px' }}>{v}</span>)}
+                  </div>
+                </div>
+              )) : (
+                <div style={{ color:'var(--text-muted)', fontSize:13 }}>No trips yet</div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:16, marginBottom:16 }}>
+            <h3 style={{ fontSize:16, fontWeight:500, marginBottom:10 }}>Your travel preferences</h3>
+            <div style={{ display:'grid', gap:10 }}>
+              <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
+                <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Default origin city</span>
+                <input value={prefs.defaultOrigin} onChange={(e)=>setPrefs(p=>({ ...p, defaultOrigin:e.target.value }))} placeholder="Enter city" />
+              </div>
+              <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
+                <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Preferred vibes</span>
+                <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+                  {['Culture','Nature','Food','Nightlife','Wellness','Shopping'].map(v => {
+                    const on = prefs.defaultVibes.includes(v);
+                    return (
+                      <button key={v} className={`chip${on ? ' on' : ''}`} onClick={() => setPrefs(p => ({ ...p, defaultVibes: on ? p.defaultVibes.filter(x => x !== v) : [...p.defaultVibes, v] }))}>
+                        {v}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
+                <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Usual group type</span>
+                <CustomDropdown
+                  label="Group"
+                  value={prefs.defaultGroup}
+                  onChange={(v)=>setPrefs(p=>({ ...p, defaultGroup:v }))}
+                  options={[{ value:'Solo', label:'Solo' }, { value:'Couple', label:'Couple' }, { value:'Family', label:'Family' }, { value:'Friends', label:'Friends' }]}
+                />
+              </div>
+              <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
+                <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Currency display</span>
+                <CustomDropdown
+                  label="Currency"
+                  value={prefs.currency}
+                  onChange={(v)=>setPrefs(p=>({ ...p, currency:v }))}
+                  options={Object.keys(EXCHANGE).map(c => ({ value:c, label:c }))}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:16 }}>
+            <h3 style={{ fontSize:16, fontWeight:500, marginBottom:10 }}>Account</h3>
+            <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+              <button className="btn-secondary" onClick={()=>setShowPwdForm(p=>!p)}>Change Password</button>
+              <button className="btn-secondary" style={{ color:'#F87171', borderColor:'rgba(248,113,113,0.4)' }} onClick={()=>setDeleteModal('deleteAccount')}>Delete Account</button>
+              {user?.isGuest && <button className="btn-primary" onClick={()=>navigateTo('auth')}>Convert to full account</button>}
+            </div>
+            {showPwdForm && (
+              <div style={{ marginTop:12, display:'grid', gap:8 }}>
+                <input type="password" placeholder="Current password" value={pwdForm.current} onChange={(e)=>setPwdForm(p=>({ ...p, current:e.target.value }))} />
+                <input type="password" placeholder="New password" value={pwdForm.next} onChange={(e)=>setPwdForm(p=>({ ...p, next:e.target.value }))} />
+                <input type="password" placeholder="Confirm new password" value={pwdForm.confirm} onChange={(e)=>setPwdForm(p=>({ ...p, confirm:e.target.value }))} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── SETTINGS PAGE ── */}
+      {page==='settings' && (
+        <div className="fade-up" style={{ maxWidth:640, margin:'0 auto', padding:'40px 20px' }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
+            <h1 style={{ fontSize:28, fontWeight:500 }}>Settings</h1>
+            <button className="btn-secondary" onClick={()=>navigateTo('dashboard')}>← Back</button>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:14, padding:14, marginBottom:12 }}>
+            <div style={{ fontWeight:500, marginBottom:10 }}>Theme</div>
+            <div style={{ display:'flex', gap:8 }}>
+              {[
+                ['🌙 Dark', 'dark'],
+                ['☀️ Light', 'light'],
+                ['💻 System', 'system']
+              ].map(([label, value]) => (
+                <button key={value} className={`chip${prefs.theme===value ? ' on' : ''}`} onClick={()=>setPrefs(p=>({ ...p, theme:value }))}>{label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:14, padding:14, marginBottom:12 }}>
+            <div style={{ fontWeight:500, marginBottom:10 }}>Display Preferences</div>
+            <div style={{ display:'grid', gap:10 }}>
+              <CustomDropdown label="Default currency" value={prefs.currency} onChange={(v)=>setPrefs(p=>({ ...p, currency:v }))} options={['USD','INR','EUR','AED','GBP','SGD','JPY','THB'].map(c=>({ value:c, label:c }))} />
+              <CustomDropdown label="Default pace" value={prefs.pace} onChange={(v)=>setPrefs(p=>({ ...p, pace:v }))} options={[{ value:'relaxed', label:'Relaxed' }, { value:'balanced', label:'Balanced' }, { value:'fastpaced', label:'Fast-paced' }]} />
+              <CustomDropdown label="Distance unit" value={prefs.distanceUnit} onChange={(v)=>setPrefs(p=>({ ...p, distanceUnit:v }))} options={[{ value:'km', label:'km' }, { value:'miles', label:'miles' }]} />
+              <CustomDropdown label="Temperature unit" value={prefs.tempUnit} onChange={(v)=>setPrefs(p=>({ ...p, tempUnit:v }))} options={[{ value:'C', label:'°C' }, { value:'F', label:'°F' }]} />
+            </div>
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:14, padding:14, marginBottom:12 }}>
+            <div style={{ fontWeight:500, marginBottom:10 }}>Notifications</div>
+            {[['Trip reminders', 'reminders'], ['Weather alerts', 'weather'], ['New features', 'features']].map(([label, key]) => (
+              <div key={key} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 0' }}>
+                <span style={{ color:'var(--text-secondary)' }}>{label}</span>
+                <ToggleSwitch enabled={prefs.notifications[key]} onToggle={() => setPrefs(p => ({ ...p, notifications:{ ...p.notifications, [key]:!p.notifications[key] } }))} />
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:14, padding:14 }}>
+            <div style={{ fontWeight:500, marginBottom:10 }}>Data & Privacy</div>
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+              <button className="btn-secondary" onClick={exportMyData}>Export my data</button>
+              <button className="btn-secondary" onClick={()=>setDeleteModal('clearHistory')}>Clear trip history</button>
+              <button className="btn-secondary" style={{ color:'#F87171', borderColor:'rgba(248,113,113,0.4)' }} onClick={()=>setDeleteModal('deleteAccount')}>Delete account</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── SAVED TRIPS ── */}
       {page==='saved' && (
         <div className="fade-up" style={{ maxWidth:1100, margin:'0 auto', padding:32 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:32 }}>
             <h1 style={{ fontWeight:400, fontSize:28 }}>My Saved Trips</h1>
-            <button className="btn-secondary" onClick={()=>setPage('dashboard')}>← Back</button>
+            <button className="btn-secondary" onClick={()=>navigateTo('dashboard')}>← Back</button>
           </div>
-          {savedTrips.length===0 ? (
+          {savedLoading ? (
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }}>
+              {[1,2,3].map(i => (
+                <div key={i} style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:20 }}>
+                  <Skeleton h={20} w="70%" />
+                  <div style={{ height:10 }} />
+                  <Skeleton h={14} w="55%" />
+                  <div style={{ height:12 }} />
+                  <Skeleton h={12} w="90%" />
+                </div>
+              ))}
+            </div>
+          ) : savedTrips.length===0 ? (
             <div style={{ textAlign:'center', padding:60, color:'#64748B' }}>
-              <div style={{ fontSize:48, marginBottom:16 }}>🗺️</div>
-              <p style={{ fontSize:16 }}>No saved trips yet</p>
+              <svg width="120" height="80" viewBox="0 0 120 80" style={{ marginBottom:10 }}>
+                <path d="M10 40 L110 40" stroke="#334155" strokeWidth="1.5" strokeDasharray="4 4"/>
+                <text x="55" y="44" fontSize="24" textAnchor="middle" style={{ animation:'float 3s ease-in-out infinite' }}>✈️</text>
+              </svg>
+              <p style={{ fontSize:16 }}>No trips yet - your adventures start here</p>
               <p style={{ fontSize:13, marginTop:8 }}>Create your first trip to see it here</p>
               <RippleBtn className="btn-primary" onClick={()=>startNew(0,true)} style={{ marginTop:20 }}>Plan a Trip →</RippleBtn>
             </div>
           ) : (
             <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }}>
               {savedTrips.map(trip=>(
-                <div key={trip.id} style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:16, padding:20, cursor:'pointer', transition:'all 0.2s' }} onClick={()=>{ setItin(trip); setPage('itinerary'); }}>
+                <div key={trip.id} style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:16, padding:20, cursor:'pointer', transition:'all 0.2s' }} onClick={()=>{ setItin({ ...trip, days:(trip.days||[]).map(day=>({ ...day, stops:nearestNeighborSort((day.stops||[]).slice(0,4)) })) }); navigateTo('itinerary'); }}>
                   <h3 style={{ fontWeight:500, marginBottom:6 }}>{trip.origin} → {trip.destination}</h3>
                   <p style={{ color:'#64748B', fontSize:13, marginBottom:12 }}>{trip.duration_days} days • {(trip.vibes||[]).join(', ')||'Mixed'}</p>
                   <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
@@ -1668,6 +2546,170 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {deleteModal && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'grid', placeItems:'center', zIndex:650, backdropFilter:'blur(6px)' }} onClick={()=>setDeleteModal('')}>
+          <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, maxWidth:400, width:'90%' }} onClick={e=>e.stopPropagation()}>
+            <h3 style={{ marginBottom:8 }}>{deleteModal==='clearHistory' ? 'Clear trip history?' : 'Delete account?'}</h3>
+            <p style={{ color:'#94A3B8', fontSize:13, marginBottom:16 }}>
+              {deleteModal==='clearHistory' ? 'This removes all saved trips from this browser.' : 'This will sign you out from this session.'}
+            </p>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn-secondary" style={{ flex:1 }} onClick={()=>setDeleteModal('')}>Cancel</button>
+              <button className="btn-primary" style={{ flex:1, background:'linear-gradient(135deg,#EF4444,#DC2626)' }} onClick={deleteModal==='clearHistory' ? clearTripHistory : logout}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── TOASTS ── */}
+      <div style={{ position:'fixed', bottom:24, right:24, zIndex:999, display:'flex', flexDirection:'column', gap:8 }}>
+        {toasts.map(t => (
+          <div key={t.id} style={{ background:t.type==='success'?'#1E293B':'rgba(239,68,68,0.1)', border:`1px solid ${t.type==='success'?'#334155':'rgba(239,68,68,0.3)'}`, borderRadius:12, padding:'12px 16px', fontSize:14, color:t.type==='error'?'#F87171':'#F1F5F9', boxShadow:'0 8px 32px rgba(0,0,0,0.4)', animation:'slideInRight 0.3s ease', maxWidth:300, backdropFilter:'blur(8px)' }}>
+            {t.msg}
+          </div>
+        ))}
+      </div>
+
+      </div>
     </div>
   );
+}
+
+function Skeleton({ w='100%', h=16, r=8 }) {
+  return (
+    <div style={{ width:w, height:h, borderRadius:r, background:'linear-gradient(90deg,var(--bg-surface) 25%,var(--bg-elevated) 50%,var(--bg-surface) 75%)', backgroundSize:'200% 100%', animation:'shimmer 1.5s infinite' }}/>
+  );
+}
+
+function ToggleSwitch({ enabled, onToggle }) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{ width:44, height:24, borderRadius:12, background:enabled?'#6366F1':'var(--border)', position:'relative', cursor:'pointer', transition:'all 0.3s' }}
+    >
+      <div
+        style={{ width:18, height:18, borderRadius:'50%', background:'white', position:'absolute', top:3, left:enabled?'23px':'3px', transition:'left 0.25s ease', boxShadow:'0 1px 4px rgba(0,0,0,0.3)' }}
+      />
+    </div>
+  );
+}
+
+function CustomDropdown({ options, value, onChange, label }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = e => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const selected = options.find(opt => opt.value === value);
+  return (
+    <div ref={ref} style={{ position:'relative' }}>
+      <div
+        onClick={() => setOpen(!open)}
+        style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:10, padding:'10px 14px', cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:14, userSelect:'none', transition:'all 0.2s', color:'var(--text-primary)' }}
+      >
+        <span>{selected?.label || value || label}</span>
+        <span style={{ color:'var(--text-muted)', transition:'transform 0.2s', transform:open?'rotate(180deg)':'none' }}>▾</span>
+      </div>
+      {open && (
+        <div style={{ position:'absolute', top:'calc(100% + 6px)', left:0, right:0, background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:12, zIndex:200, overflow:'hidden', boxShadow:'0 16px 48px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
+          {options.map(opt => (
+            <div
+              key={opt.value}
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              style={{ padding:'11px 14px', cursor:'pointer', fontSize:14, background:value===opt.value?'rgba(99,102,241,0.1)':'transparent', color:value===opt.value?'#A5B4FC':'var(--text-primary)', transition:'background 0.15s', display:'flex', alignItems:'center', justifyContent:'space-between' }}
+            >
+              {opt.label}
+              {value===opt.value && <span style={{color:'#6366F1'}}>✓</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function rankItems(items, rankBy, type, userBudgetLevel, userComfortRadius) {
+  const budgetCap = HOTEL_CAPS[userBudgetLevel]?.max || 9999;
+  const radiusKm = RADIUS_KM[userComfortRadius] || Infinity;
+
+  const scored = (items || []).map((item) => {
+    let withinBudget = true;
+    let withinRadius = true;
+    let budgetFitScore = 0;
+
+    const price = item.price_usd || item.cost_usd || 0;
+    const rating = item.rating || 0;
+    const dist = parseFloat(item._distFromPrev || item.distance_from_last_stop || 0);
+
+    if (type === 'hotel') {
+      withinBudget = price <= budgetCap;
+      budgetFitScore = withinBudget ? (budgetCap - price) / budgetCap : -1;
+    }
+    if (type === 'food') {
+      const foodCap = budgetCap * 0.3;
+      withinBudget = price <= foodCap;
+      budgetFitScore = withinBudget ? (foodCap - price) / foodCap : -1;
+    }
+
+    if (dist > 0) {
+      withinRadius = dist <= radiusKm;
+    }
+
+    return {
+      ...item,
+      _withinBudget: withinBudget,
+      _withinRadius: withinRadius,
+      _budgetFitScore: budgetFitScore,
+      _price: price,
+      _rating: rating,
+      _dist: dist,
+    };
+  });
+
+  return [...scored].sort((a, b) => {
+    switch (rankBy) {
+      case 'price_low':
+        if (a._withinBudget && !b._withinBudget) return -1;
+        if (!a._withinBudget && b._withinBudget) return 1;
+        return a._price - b._price;
+      case 'price_high':
+        return b._price - a._price;
+      case 'rating':
+        if (!a._rating && b._rating) return 1;
+        if (a._rating && !b._rating) return -1;
+        return b._rating - a._rating;
+      case 'distance':
+        if (!a._dist && b._dist) return 1;
+        if (a._dist && !b._dist) return -1;
+        return a._dist - b._dist;
+      case 'duration':
+        return (a.duration_minutes || 60) - (b.duration_minutes || 60);
+      case 'budget_fit':
+        if (a._withinBudget && !b._withinBudget) return -1;
+        if (!a._withinBudget && b._withinBudget) return 1;
+        return b._budgetFitScore - a._budgetFitScore;
+      case 'recommended':
+      default: {
+        const scoreA = (a._withinBudget ? 3 : 0) + (a._withinRadius ? 2 : 0) + (a._rating || 0) + (a.recommended ? 5 : 0);
+        const scoreB = (b._withinBudget ? 3 : 0) + (b._withinRadius ? 2 : 0) + (b._rating || 0) + (b.recommended ? 5 : 0);
+        return scoreB - scoreA;
+      }
+    }
+  });
+}
+
+function getRankReason(item, rankBy) {
+  const reasons = [];
+  if (item.recommended) reasons.push('recommended by our agents');
+  if (item._withinBudget) reasons.push('within your budget');
+  if (item._withinRadius) reasons.push('within comfort radius');
+  if (item._rating >= 4.5) reasons.push(`rated ${item._rating}★`);
+  if (rankBy === 'price_low') reasons.push('lowest price');
+  if (rankBy === 'distance') reasons.push('nearest stop');
+  return reasons.length ? `Ranked #1 · ${reasons.slice(0, 3).join(' · ')}` : 'Top pick';
 }
