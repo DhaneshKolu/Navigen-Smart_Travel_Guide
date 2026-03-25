@@ -1,4 +1,5 @@
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from math import asin, cos, radians, sin, sqrt
 
@@ -12,6 +13,8 @@ from app.db.models.user import User
 from app.db.session import get_db
 from app.services.geo_service import GeoService
 from app.services.hotel_service import HotelService
+from app.services.places_service import fetch_real_hotels_with_fallback, fetch_real_restaurants_with_fallback
+from app.services.transport_service import calculate_transport_cost
 
 
 router = APIRouter(prefix="/api", tags=["Plan API"])
@@ -118,6 +121,53 @@ Allowed food types: {', '.join(food['types'])}
 Maximum entry fee: ${stop['max_usd']} per attraction
 Preferred stop types: {', '.join(stop['prefer'])}
 
+ACTIVITY ENTRY FEE RULES:
+- Return cost_usd as EXACT entry fee or 0.
+- NEVER return null or omit this field.
+- NEVER average or estimate.
+
+Known Indian attraction entry fees (2024):
+FREE (cost_usd: 0):
+- India Gate, Lotus Temple, Jama Masjid, beaches,
+  markets, Akshardham main temple, Gurudwaras,
+  most temples, public parks, Lodi Garden,
+  Humayun's Tomb gardens (outer)
+
+PAID (exact fees):
+- Red Fort: Indians ₹35 ($0.42)
+- Qutub Minar: Indians ₹35 ($0.42)
+- Humayun's Tomb: Indians ₹35 ($0.42)
+- Agra Fort: Indians ₹50 ($0.60)
+- Taj Mahal: Indians ₹50 ($0.60)
+- National Museum: ₹20 ($0.24)
+- Amber Fort Jaipur: ₹100 ($1.20)
+- City Palace Jaipur: ₹200 ($2.40)
+- Mysore Palace: ₹100 ($1.20)
+- Gateway of India: FREE ($0)
+- Marine Drive: FREE ($0)
+- Burj Khalifa Dubai: $35
+- Dubai Mall: FREE ($0)
+- Desert Safari Dubai: $55
+
+If exact fee is unknown, use 0.
+DO NOT use average or placeholder values.
+DO NOT return 2.5 or 5 as default activity cost.
+
+For each stop/attraction, return REAL entry fee guidance:
+- Government museums: ₹20-50 ($0.25-$0.60)
+- ASI monuments (Red Fort, Qutub, etc): Indians ₹35, Foreigners ₹550-600
+- National parks: ₹100-500
+- Temples/Mosques/Gurudwaras: FREE (₹0)
+- Beaches: FREE (₹0)
+- Markets: FREE (₹0)
+- Public parks: ₹5-20
+- Private attractions: typically ₹200-2000
+- Bollywood studios: often ₹1000+
+
+Return cost_usd as ACTUAL entry fee in USD.
+Use 0 for free attractions.
+Do not invent random fees.
+
 === IMPORTANT ===
 All prices must be realistic for {destination}.
 Hotel + Food + Activities must fit within this daily budget.
@@ -176,6 +226,32 @@ Requirements:
 - Prefer: {', '.join(stop['prefer'])}
 - Include free attractions (temples, parks, beaches, markets)
 - Maximum 4 stops per day for {days} days
+
+For each stop/attraction, return the REAL entry fee:
+- Government museums: ₹20-50 ($0.25-$0.60)
+- ASI monuments (Red Fort, Qutub etc): Indians ₹35, Foreigners ₹550-600
+- National Parks: ₹100-500
+- Temples/Mosques/Gurudwaras: FREE (₹0)
+- Beaches: FREE (₹0)
+- Markets: FREE (₹0)
+- Public parks: ₹5-20
+- Private attractions: varies ₹200-2000
+- Bollywood studios: ₹1000+
+
+Return cost_usd as the ACTUAL entry fee in USD.
+Use 0 for free attractions.
+NEVER return null or omit this field.
+DO NOT estimate random prices.
+DO NOT return 2.5 or 5 as default activity cost.
+
+Example:
+- Red Fort Delhi: cost_usd 0.42 (₹35 Indian price)
+- Qutub Minar: cost_usd 0.42 (₹35)
+- India Gate: cost_usd 0 (free)
+- Lotus Temple: cost_usd 0 (free)
+- Jama Masjid: cost_usd 0 (free; optional camera fee separate)
+- National Museum Delhi: cost_usd 0.60 (₹50)
+- Akshardham: cost_usd 0 (free entry; shows paid)
 """
 
 
@@ -238,6 +314,21 @@ class PlanRequest(BaseModel):
         self.hotel_max_usd = HOTEL_CAPS[level]["max_usd"]
         self.food_max_usd = FOOD_CAPS[level]["max_usd"]
         self.stop_max_usd = STOP_CAPS[level]["max_usd"]
+
+
+class TripSaveRequest(BaseModel):
+    origin: str
+    destination: str
+    duration_days: int
+    destination_country: str | None = None
+    local_currency: str | None = None
+    center_lat: float | None = None
+    center_lng: float | None = None
+    vibes: list[str] = []
+    group_type: str = ""
+    budget_level: str = ""
+    comfort_radius: str = ""
+    itinerary: dict
 
 
 def _infer_geo_from_destination(destination: str) -> tuple[str, str]:
@@ -308,6 +399,42 @@ def _budget_band(level: str, budget_range: dict | None = None) -> tuple[float, f
     return 0, 10
 
 
+def _build_google_hotels_url(destination: str, budget_level: str, nights: int = 1) -> str:
+    level = _normalize_budget_level(budget_level)
+    cap = HOTEL_CAPS[level]
+    today = datetime.now(timezone.utc)
+    checkin = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    checkout = checkin + timedelta(days=max(1, nights))
+
+    ci = checkin.strftime("%m/%d/%Y")
+    co = checkout.strftime("%m/%d/%Y")
+    return (
+        "https://www.google.com/travel/hotels/search"
+        f"?q=hotels+in+{destination.replace(' ', '+')}"
+        f"&checkin={ci}&checkout={co}"
+        f"&price_max={int(cap['max_inr'])}&price_min=0&currency=INR"
+    )
+
+
+def _recommended_budget_areas(destination: str) -> list[str]:
+    areas = {
+        "delhi": ["Paharganj", "Karol Bagh", "Laxmi Nagar", "Sadar Bazaar"],
+        "mumbai": ["Dadar", "Andheri East", "Kurla", "Thane"],
+        "goa": ["Panaji", "Mapusa", "Old Goa"],
+        "jaipur": ["Sindhi Camp", "Bani Park", "Station Road"],
+        "kolkata": ["Sudder Street", "Howrah", "Park Circus"],
+        "chennai": ["Egmore", "T Nagar", "Koyambedu"],
+        "hyderabad": ["Abids", "Secunderabad", "Ameerpet"],
+        "bangalore": ["Majestic", "Shivajinagar", "Yeshwanthpur"],
+        "bengaluru": ["Majestic", "Shivajinagar", "Yeshwanthpur"],
+    }
+    dest_l = (destination or "").lower()
+    for city, vals in areas.items():
+        if city in dest_l:
+            return vals
+    return []
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
     d_lat = radians(lat2 - lat1)
@@ -363,13 +490,11 @@ def _meal_cost_usd_for_level(budget_level: str) -> float:
 
 
 def _stop_cost_usd_for_level(budget_level: str, category: str) -> float:
-    level = _normalize_budget_level(budget_level)
-    cap = STOP_CAPS[level]["max_usd"]
+    # Only return explicit known-free defaults for generic categories.
+    # Unknown/paid entries should be set by upstream source data when available.
     if category in {"Nature", "Leisure"}:
         return 0.0
-    if cap >= 9999:
-        return 25.0
-    return min(cap, round(max(0.0, cap * 0.5), 2))
+    return 0.0
 
 
 async def _build_dynamic_plan(payload: PlanRequest) -> dict:
@@ -460,6 +585,8 @@ async def _build_dynamic_plan(payload: PlanRequest) -> dict:
                 "recommended": i == 0,
                 "price_inr": int(round(price * 83.0)),
                 "booking_url": f"https://google.com/search?q={(h.get('name') or payload.destination).replace(' ', '+')}+{payload.destination.replace(' ', '+')}",
+                "search_url": _build_google_hotels_url(payload.destination, level, payload.days),
+                "verified": bool(h.get("name")),
             }
         )
 
@@ -469,18 +596,22 @@ async def _build_dynamic_plan(payload: PlanRequest) -> dict:
         hotels = under_cap
 
     if not hotels:
-        fallback_price = round(min(hotel_cap, 5.0 if level == "Budget" else 12.0 if level == "Relaxed" else 28.0))
         hotels = [
             {
-                "name": f"{payload.destination} Central Hotel",
-                "stars": 2 if level in {"Budget", "Relaxed"} else 3,
-                "price_usd": fallback_price,
-                "amenities": ["WiFi", "Breakfast", "Pool"],
-                "distance_from_last_stop": "2.0 km",
+                "type": "search_link",
+                "platform": "google_hotels",
+                "name": "Live hotel search",
+                "destination": payload.destination,
+                "budget_level": level,
+                "price_max_inr": int(HOTEL_CAPS[level]["max_inr"]),
+                "search_query": f"budget hotels in {payload.destination} under ₹{int(HOTEL_CAPS[level]['max_inr'])}",
+                "recommended_areas": _recommended_budget_areas(payload.destination),
+                "price_usd": 0,
+                "price_inr": 0,
                 "recommended": True,
-                "price_inr": int(round(fallback_price * 83.0)),
-                "overBudget": fallback_price > hotel_cap,
-                "booking_url": f"https://google.com/search?q={payload.destination.replace(' ', '+')}+hotel",
+                "verified": False,
+                "search_url": _build_google_hotels_url(payload.destination, level, payload.days),
+                "booking_url": _build_google_hotels_url(payload.destination, level, payload.days),
             }
         ]
 
@@ -564,6 +695,35 @@ async def _build_dynamic_plan(payload: PlanRequest) -> dict:
             }
         )
 
+    # Replace AI/synthetic food and hotels with real Google Places data (with safe fallback links).
+    for day in days:
+        stops_for_day = day.get("stops") or []
+        center_lat = stops_for_day[0].get("lat") if stops_for_day else lat
+        center_lng = stops_for_day[0].get("lng") if stops_for_day else lng
+
+        real_food, real_hotels = await asyncio.gather(
+            fetch_real_restaurants_with_fallback(
+                payload.destination,
+                level,
+                payload.vibes or [],
+                center_lat,
+                center_lng,
+            ),
+            fetch_real_hotels_with_fallback(
+                payload.destination,
+                level,
+                center_lat,
+                center_lng,
+            ),
+        )
+
+        if real_food:
+            day["food"] = real_food
+        if real_hotels:
+            day["hotels"] = real_hotels
+
+    transport_data = await calculate_transport_cost(days, level)
+
     country, currency = _infer_geo_from_destination(payload.destination)
 
     return {
@@ -582,6 +742,8 @@ async def _build_dynamic_plan(payload: PlanRequest) -> dict:
             "hotel_max_usd": hotel_cap,
             "food_max_usd": food_cap,
             "stop_max_usd": stop_cap,
+            "transport_summary": transport_data,
+            "total_transport_usd": transport_data.get("total_usd", 0),
             "created_at": datetime.utcnow().isoformat(),
             "days": days,
         }
@@ -696,19 +858,84 @@ async def get_trips(
         .all()
     )
 
-    return [
-        {
+    trips = []
+    for row in rows:
+        constraints = row.constraints or {}
+        graph = dict(row.trip_graph or {})
+        trips.append({
+            **graph,
             "id": row.id,
             "origin": row.base_city,
             "destination": row.region,
-            "duration_days": (row.constraints or {}).get("days", 1),
-            "vibes": (row.constraints or {}).get("vibes", []),
-            "group_type": (row.constraints or {}).get("group_type", ""),
-            "budget_level": (row.constraints or {}).get("budget_level", ""),
-            "created_at": (row.trip_graph or {}).get("created_at"),
-        }
-        for row in rows
-    ]
+            "duration_days": constraints.get("days", graph.get("duration_days", 1)),
+            "vibes": constraints.get("vibes", graph.get("vibes", [])),
+            "group_type": constraints.get("group_type", graph.get("group_type", "")),
+            "budget_level": constraints.get("budget_level", graph.get("budget_level", "")),
+            "comfort_radius": constraints.get("comfort_radius", graph.get("comfort_radius", "")),
+            "created_at": graph.get("created_at"),
+            "itinerary": graph,
+        })
+    return trips
+
+
+@router.post("/trips")
+async def save_trip(
+    payload: TripSaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    created_at = datetime.now(timezone.utc).isoformat()
+    trip_graph = {
+        **payload.itinerary,
+        "origin": payload.origin,
+        "destination": payload.destination,
+        "duration_days": payload.duration_days,
+        "destination_country": payload.destination_country,
+        "local_currency": payload.local_currency,
+        "center_lat": payload.center_lat,
+        "center_lng": payload.center_lng,
+        "vibes": payload.vibes,
+        "group_type": payload.group_type,
+        "budget_level": payload.budget_level,
+        "comfort_radius": payload.comfort_radius,
+        "created_at": created_at,
+    }
+    trip = Trip(
+        user_id=current_user.id,
+        region=payload.destination,
+        base_city=payload.origin,
+        constraints={
+            "days": payload.duration_days,
+            "vibes": payload.vibes,
+            "group_type": payload.group_type,
+            "budget_level": payload.budget_level,
+            "comfort_radius": payload.comfort_radius,
+        },
+        trip_graph=trip_graph,
+    )
+    db.add(trip)
+    db.commit()
+    db.refresh(trip)
+
+    return {
+        **trip_graph,
+        "id": trip.id,
+        "itinerary": trip_graph,
+    }
+
+
+@router.delete("/trips/clear-all")
+async def clear_all_trips(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    deleted_count = (
+        db.query(Trip)
+        .filter(Trip.user_id == current_user.id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"deleted": True, "count": deleted_count, "userId": current_user.id}
 
 
 @router.get("/trips/{trip_id}")
@@ -746,4 +973,4 @@ async def delete_trip(
 
     db.delete(trip)
     db.commit()
-    return {"ok": True}
+    return {"deleted": True, "id": trip_id}

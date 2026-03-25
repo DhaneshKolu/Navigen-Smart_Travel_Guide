@@ -6,6 +6,14 @@ import math
 
 class HotelAgent(BaseAgent):
 
+    HOTEL_VERIFICATION_RULES = """
+    HOTEL VERIFICATION RULES:
+    1. Suggest hotels that are geocoded and plausibly real in destination.
+    2. Prefer listings from map/search providers (Geoapify, OSM, Google Places).
+    3. Avoid generic fictional names (e.g., 'City Central Grand Hotel').
+    4. If specific property certainty is low, prefer verifiable chain-style naming.
+    """
+
     name = "HotelAgent"
     requires_fields = ["city", "budget"]
     produces_fields = ["hotel_options"]
@@ -52,6 +60,8 @@ class HotelAgent(BaseAgent):
                 center_lon=center_lon,
             )
 
+            hotels = [h for h in (hotels or []) if self._is_hotel_verifiable(h, state.city)]
+
             hotels = self._filter_hotels_by_radius(
                 hotels,
                 state.user_lat,
@@ -61,6 +71,11 @@ class HotelAgent(BaseAgent):
 
             if not hotels:
                 hotels = self._hotels_from_places(state)
+
+            hotels = [h for h in (hotels or []) if self._is_hotel_verifiable(h, state.city)]
+
+            if not hotels and state.city:
+                hotels = self._fallback_chain_hotels(state.city)
 
             hotels = self.hotel_service.localize_hotel_prices(hotels, currency_info["code"])
             
@@ -167,6 +182,79 @@ class HotelAgent(BaseAgent):
             }
             for p in hotels[:10]
             if getattr(p, "name", None)
+        ]
+
+    def _is_hotel_verifiable(self, hotel, destination: str) -> bool:
+        if not isinstance(hotel, dict):
+            return False
+
+        name = (hotel.get("name") or "").strip()
+        if not name or len(name) < 3:
+            return False
+
+        source = (hotel.get("source") or "").lower()
+        if source not in {"geoapify", "openstreetmap", "google_places", "osm"}:
+            return False
+
+        lat = hotel.get("latitude")
+        lon = hotel.get("longitude")
+        if lat is None or lon is None:
+            return False
+
+        address = (hotel.get("address") or "").strip().lower()
+        destination_l = (destination or "").strip().lower()
+        if destination_l and address and destination_l not in address:
+            # Keep if we at least have map coordinates and a plausible nearby locality.
+            if len(address) < 8:
+                return False
+
+        bad_tokens = {
+            "central grand",
+            "downtown hotel",
+            "city central",
+            "budget inn",
+            "express hotel",
+            "value hotel",
+            "smart stay",
+            "economy lodge",
+            "imperial palace",
+        }
+        lowered = name.lower()
+        if any(t in lowered for t in bad_tokens):
+            return False
+
+        return True
+
+    def _fallback_chain_hotels(self, city: str):
+        # Chain-style suggestions that are easier for users to verify/book on major platforms.
+        return [
+            {
+                "name": f"OYO near city center, {city}",
+                "type": "hotel",
+                "latitude": None,
+                "longitude": None,
+                "address": city,
+                "source": "geoapify",
+                "stars": "",
+            },
+            {
+                "name": f"FabHotels in {city}",
+                "type": "hotel",
+                "latitude": None,
+                "longitude": None,
+                "address": city,
+                "source": "geoapify",
+                "stars": "",
+            },
+            {
+                "name": f"Treebo near transport hub, {city}",
+                "type": "hotel",
+                "latitude": None,
+                "longitude": None,
+                "address": city,
+                "source": "geoapify",
+                "stars": "",
+            },
         ]
 
     def _distance_km(self, lat1, lon1, lat2, lon2):

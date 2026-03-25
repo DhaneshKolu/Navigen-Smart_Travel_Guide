@@ -258,6 +258,43 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
 }
 
+/* Leaflet map stays below navbar and all overlays */
+.leaflet-container {
+  z-index: 1 !important;
+}
+
+.leaflet-pane {
+  z-index: 2 !important;
+}
+
+.leaflet-top,
+.leaflet-bottom {
+  z-index: 3 !important;
+}
+
+/* Navbar always on top */
+.navbar {
+  z-index: 1000 !important;
+  isolation: isolate;
+}
+
+/* Dropdowns and overlays above map */
+.dropdown {
+  z-index: 9999 !important;
+}
+
+.drawer-overlay {
+  z-index: 9000 !important;
+}
+
+.drawer {
+  z-index: 9001 !important;
+}
+
+.modal-overlay {
+  z-index: 9002 !important;
+}
+
 input::placeholder,
 textarea::placeholder {
   color: #475569;
@@ -358,14 +395,28 @@ input[type="checkbox"] {
 
 /* ─── MAP CONTROLS ──────────────────────────────────────────────────────────── */
 .map-control {
-  background: rgba(15, 23, 42, 0.88);
-  border: 0.5px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: #1E293B !important;
+  border: 1px solid #334155 !important;
   border-radius: 10px;
   padding: 6px 8px;
   font-size: 13px;
   color: #94A3B8;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+
+.map-panel > div[style*="position: absolute"],
+.map-panel > div[style*="position:absolute"] {
+  z-index: 1000 !important;
+  pointer-events: auto !important;
+}
+
+.leaflet-top.leaflet-right {
+  z-index: 800 !important;
+}
+
+.leaflet-bottom.leaflet-right {
+  z-index: 800 !important;
 }
 
 /* ─── NAVIGATION CONNECTOR ──────────────────────────────────────────────────── */

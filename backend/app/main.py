@@ -1,3 +1,6 @@
+import os
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from app.api.health import router as health_router
 from app.db.engine import engine
@@ -10,7 +13,10 @@ from app.core.settings import settings
 from app.api.weather import router as weather_router
 from app.api.auth_api import router as auth_api_router
 from app.api.plan_api import router as plan_api_router
+from app.api.user_api import router as user_api_router
 
+
+load_dotenv()
 
 
 
@@ -19,12 +25,15 @@ Base.metadata.create_all(bind=engine)
 
 
 app = FastAPI(title="NAVIGEN - Smart Travel Guide")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,6 +46,7 @@ app.include_router(travel_router)
 app.include_router(weather_router)
 app.include_router(itinerary_router)
 app.include_router(plan_api_router)
+app.include_router(user_api_router)
 @app.options("/{rest_of_path:path}")
 async def preflight_handler():
     return {}

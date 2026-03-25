@@ -23,6 +23,8 @@ class LoginRequest(BaseModel):
 
 
 def _name_from_user(user: User, fallback: str = "Traveler") -> str:
+    if user.name:
+        return user.name
     if user.email and "@" in user.email:
         return user.email.split("@")[0].replace(".", " ").title()
     return fallback
@@ -34,7 +36,7 @@ def register_api(payload: RegisterRequest, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    user = create_user(db, payload.email, payload.password)
+    user = create_user(db, payload.email, payload.password, payload.name)
     token = create_access_token({"sub": str(user.id)})
 
     return {

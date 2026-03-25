@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import API_BASE from './config';
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const DAY_COLORS = ['#6366F1','#0EA5E9','#10B981','#F59E0B','#F43F5E','#8B5CF6','#EC4899'];
@@ -58,11 +59,33 @@ const HOTEL_CAPS = {
   Luxury: { max: 35, label: '$18-35/night     (₹1,500-2,900)' },
   Ultra: { max: 9999, label: '$35+/night        (₹2,900+)' },
 };
+const HOTEL_INR_CAPS = {
+  Budget: { min: 0, max: 500, label: 'Under ₹500/night' },
+  Relaxed: { min: 500, max: 1500, label: '₹500-1,500/night' },
+  Luxury: { min: 1500, max: 2900, label: '₹1,500-2,900/night' },
+  Ultra: { min: 2900, max: 99999, label: '₹2,900+/night' },
+};
+const BUDGET_AREAS = {
+  Delhi: ['Paharganj', 'Karol Bagh', 'Laxmi Nagar', 'Sadar Bazaar'],
+  Mumbai: ['Dadar', 'Andheri East', 'Kurla', 'Thane'],
+  Goa: ['Panaji', 'Mapusa', 'Old Goa'],
+  Jaipur: ['Sindhi Camp', 'Bani Park', 'Station Road'],
+  Kolkata: ['Sudder Street', 'Howrah', 'Park Circus'],
+  Chennai: ['Egmore', 'T Nagar', 'Koyambedu'],
+  Hyderabad: ['Abids', 'Secunderabad', 'Ameerpet'],
+  Bangalore: ['Majestic', 'Shivajinagar', 'Yeshwanthpur'],
+};
 const FOOD_CAPS = {
   Budget: 3,
   Relaxed: 9,
   Luxury: 15,
   Ultra: 9999,
+};
+const TIER_DAILY_BUDGET_USD = {
+  Budget: 8,
+  Relaxed: 20,
+  Luxury: 40,
+  Ultra: 75,
 };
 const RADIUS_KM = {
   walkable: 5,
@@ -104,21 +127,12 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', finalTheme);
 }
 
-function filterHotelsByBudget(hotels, budgetLevel) {
-  const cap = HOTEL_CAPS[budgetLevel]?.max || 9999;
-  const safeHotels = Array.isArray(hotels) ? hotels : [];
-  const filtered = safeHotels.filter(h => (h.price_usd || 0) <= cap);
-  if (filtered.length === 0) {
-    return [...safeHotels]
-      .sort((a, b) => (a.price_usd || 0) - (b.price_usd || 0))
-      .slice(0, 2)
-      .map(h => ({ ...h, overBudget: true }));
-  }
-  return [...filtered].sort((a, b) => {
-    if (a.recommended) return -1;
-    if (b.recommended) return 1;
-    return (a.price_usd || 0) - (b.price_usd || 0);
-  });
+function budgetTierFromAmount(amount) {
+  if (!Number.isFinite(amount)) return 'Budget';
+  if (amount <= 10) return 'Budget';
+  if (amount <= 30) return 'Relaxed';
+  if (amount <= 50) return 'Luxury';
+  return 'Ultra';
 }
 
 function nearestNeighborSort(stops) {
@@ -272,6 +286,153 @@ function QualityBadge({ rating }) {
   return <span style={{ background:'rgba(148,163,184,0.15)', color:'#94A3B8', fontSize:11, padding:'3px 8px', borderRadius:20, fontWeight:500, whiteSpace:'nowrap' }}>✓ Recommended</span>;
 }
 
+function HotelBookingDropdown({ hotel, destination }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (!ref.current?.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const dest = encodeURIComponent(destination || '');
+  const name = encodeURIComponent(hotel.name || '');
+  const slug = String(destination || '').toLowerCase().replace(/\s+/g, '-');
+
+  const platforms = [
+    {
+      icon: '🔍',
+      label: 'Google Hotels',
+      sub: 'Compare all prices',
+      color: '#4285F4',
+      url: hotel.maps_url || `https://www.google.com/travel/hotels/search?q=${name}+${dest}`,
+    },
+    {
+      icon: '🏡',
+      label: 'MakeMyTrip',
+      sub: 'Best Indian deals',
+      color: '#E8334A',
+      url: `https://www.makemytrip.com/hotels/hotel-listing/?checkin=03212026&checkout=03222026&roomcount=1&city=${dest}`,
+    },
+    {
+      icon: '📱',
+      label: 'OYO Rooms',
+      sub: 'Budget stays',
+      color: '#EE2E24',
+      url: `https://www.oyorooms.com/search/?location=${dest}`,
+    },
+    {
+      icon: '🎒',
+      label: 'Zostel',
+      sub: 'Backpacker hostels',
+      color: '#10B981',
+      url: `https://www.zostel.com/zostel/${slug}/`,
+    },
+    {
+      icon: '🌐',
+      label: 'Booking.com',
+      sub: 'Free cancellation',
+      color: '#003580',
+      url: `https://www.booking.com/searchresults.html?ss=${name}+${dest}`,
+    },
+    {
+      icon: '🏨',
+      label: 'Agoda',
+      sub: 'Asia specialist',
+      color: '#5C2D91',
+      url: `https://www.agoda.com/search?city=${dest}&textToSearch=${name}`,
+    },
+  ];
+
+  return (
+    <div ref={ref} style={{ position:'relative', marginTop:10 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }}>
+        <a
+          href={hotel.maps_url || `https://www.google.com/maps/search/${name}+${dest}`}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            display:'flex', alignItems:'center', justifyContent:'center', gap:4,
+            padding:'9px 8px',
+            background:'rgba(16,185,129,0.1)', border:'1px solid rgba(16,185,129,0.25)',
+            color:'#10B981', borderRadius:9,
+            fontSize:12, textDecoration:'none', fontWeight:500, transition:'all 0.2s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(16,185,129,0.2)'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(16,185,129,0.1)'; }}
+        >
+          📍 View
+        </a>
+
+        <button
+          onClick={() => setOpen(p => !p)}
+          style={{
+            display:'flex', alignItems:'center', justifyContent:'center', gap:4,
+            padding:'9px 8px',
+            background: open ? '#4F46E5' : '#6366F1', border:'none', color:'white',
+            borderRadius:9, fontSize:12,
+            cursor:'pointer', fontFamily:'inherit', fontWeight:500, transition:'all 0.2s',
+          }}
+        >
+          Book {open ? '▲' : '▼'}
+        </button>
+      </div>
+
+      {open && (
+        <div style={{
+          position:'absolute',
+          bottom:'calc(100% + 6px)',
+          left:0, right:0,
+          background:'#1E293B', border:'1px solid #334155', borderRadius:12,
+          zIndex:200, overflow:'hidden',
+          boxShadow:'0 -8px 32px rgba(0,0,0,0.5)', animation:'fadeUp 0.15s ease',
+        }}>
+          <div style={{
+            padding:'10px 14px 8px',
+            fontSize:11, color:'#64748B', borderBottom:'1px solid #334155', fontWeight:500,
+          }}>
+            Book "{hotel.name}" on:
+          </div>
+
+          {platforms.map(p => (
+            <a
+              key={p.label}
+              href={p.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setOpen(false)}
+              style={{
+                display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
+                textDecoration:'none', borderBottom:'1px solid #0F172A', transition:'background 0.15s',
+                cursor:'pointer',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#273549'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+            >
+              <span style={{ fontSize:18, flexShrink:0 }}>{p.icon}</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:500, color:p.color }}>{p.label}</div>
+                <div style={{ fontSize:10, color:'#475569' }}>{p.sub}</div>
+              </div>
+              <span style={{ fontSize:10, color:'#334155', flexShrink:0 }}>↗</span>
+            </a>
+          ))}
+
+          <div style={{
+            padding:'8px 14px',
+            fontSize:10, color:'#475569', lineHeight:1.5,
+          }}>
+            ⚠️ Verify availability before booking. Prices may vary by date.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   // ── Page & Auth ──
@@ -286,7 +447,7 @@ export default function App() {
   const [chatData, setChatData] = useState({
     origin:'', destination:'', originLat:null, originLng:null,
     destLat:null, destLng:null, days:null,
-    comfort_radius:'', vibes:[], group_type:'', budget_level:'', special_requests:''
+    comfort_radius:'', vibes:[], group_type:'', budget_level:'', budget_usd_per_day:null, special_requests:''
   });
   const [history, setHistory] = useState([]);
   const [qIdx, setQIdx] = useState(0);
@@ -306,6 +467,8 @@ export default function App() {
   const [weather, setWeather] = useState(null);
   const [savedTrips, setSavedTrips] = useState([]);
   const [savedLoading, setSavedLoading] = useState(false);
+  const [tripSaved, setTripSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [activeDay, setActiveDay] = useState(1);
   const [activeCur, setActiveCur] = useState('USD');
   const [activePace, setActivePace] = useState('balanced');
@@ -316,9 +479,8 @@ export default function App() {
   const [transportModes, setTransportModes] = useState({});
   const [completedStops, setCompletedStops] = useState({});
   const [rankBy, setRankBy] = useState('recommended');
-  const [rankSection, setRankSection] = useState('all');
   const [comfortFilter, setComfortFilter] = useState(false);
-  const [showTooltip, setShowTooltip] = useState(null);
+  const [costExpanded, setCostExpanded] = useState(false);
 
   // ── UI ──
   const [loading, setLoading] = useState(false);
@@ -328,16 +490,28 @@ export default function App() {
   const [resetModal, setResetModal] = useState(false);
   const [pendingReset, setPendingReset] = useState(0);
   const [mapReady, setMapReady] = useState(false);
+  const [mapMounted, setMapMounted] = useState(false);
   const [mapLayer, setMapLayer] = useState('dark');
   const [dayTransition, setDayTransition] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [prefs, setPrefs] = useState(defaultPrefs);
-  const [profileNameEdit, setProfileNameEdit] = useState(false);
-  const [profileName, setProfileName] = useState('');
+  const [prefsSaved, setPrefsSaved] = useState(false);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+  const [prefsDirty, setPrefsDirty] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [savingName, setSavingName] = useState(false);
   const [showPwdForm, setShowPwdForm] = useState(false);
   const [pwdForm, setPwdForm] = useState({ current:'', next:'', confirm:'' });
   const [deleteModal, setDeleteModal] = useState('');
+  const [unsavedModal, setUnsavedModal] = useState(false);
+  const [deletingTripId, setDeletingTripId] = useState(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false);
 
   // ── Refs ──
   const mapRef = useRef(null);
@@ -481,16 +655,6 @@ export default function App() {
     });
   }, [comfortFilter]);
 
-  const rankedHotels = useMemo(() => {
-    const hotels = currentDayData?.hotels || [];
-    return rankItems(hotels, rankBy, 'hotel', itin?.budget_level, itin?.comfort_radius);
-  }, [currentDayData, rankBy, itin]);
-
-  const displayedHotels = useMemo(
-    () => applyComfortFilter(rankedHotels, 'hotel', itin?.budget_level, itin?.comfort_radius),
-    [rankedHotels, applyComfortFilter, itin]
-  );
-
   const rankedFood = useMemo(() => {
     const food = currentDayData?.food || [];
     return rankItems(food, rankBy, 'food', itin?.budget_level, itin?.comfort_radius);
@@ -514,14 +678,6 @@ export default function App() {
 
   const rerankedStops = useMemo(() => computeStopTimes(displayedStops, activePace), [displayedStops, activePace]);
 
-  const allHotels = useMemo(() => {
-    const hotels = (itin?.days || []).flatMap(d =>
-      (d.hotels || []).map(h => ({ ...h, _day: d.day, _dayTitle: d.title }))
-    );
-    const ranked = rankItems(hotels, rankBy, 'hotel', itin?.budget_level, itin?.comfort_radius);
-    return applyComfortFilter(ranked, 'hotel', itin?.budget_level, itin?.comfort_radius);
-  }, [itin, rankBy, applyComfortFilter]);
-
   const foodByMeal = useMemo(() => {
     const mealTypes = ['Breakfast','Lunch','Dinner','Snack','Drinks','Dessert'];
     return mealTypes.map((mealType) => {
@@ -535,19 +691,118 @@ export default function App() {
   }, [itin, rankBy, applyComfortFilter]);
 
   const totalCost = useMemo(() => {
-    if (!itin?.days) return { hotels:0, food:0, activities:0, transport:0 };
-    let hotels=0, food=0, activities=0, transport=0;
-    itin.days.forEach(day => {
-      const h = day.hotels?.[0]?.price_usd || 0;
-      hotels += h;
-      food += (day.food||[]).reduce((a,f)=>a+(f.cost_usd||0),0) * 2;
-      activities += (day.stops||[]).reduce((a,s)=>a+(s.cost_usd||0),0);
-      transport += 15;
-    });
-    return { hotels, food, activities, transport };
-  }, [itin]);
+    if (!itin?.days) {
+      return {
+        hotels: 0,
+        food: 0,
+        activities: 0,
+        transport: 0,
+        totalUSD: 0,
+        dailyUSD: 0,
+        days: 0,
+        totalKm: 0,
+        hotelPerNight: 0,
+        foodPerDay: 0,
+        transportPerDay: 0,
+        activitiesTotal: 0,
+        paidStops: [],
+        freeStops: [],
+        freeStopsCount: 0,
+        paidStopsCount: 0,
+        transportMode: 'Bus/Metro',
+      };
+    }
 
-  const grandTotal = totalCost.hotels + totalCost.food + totalCost.activities + totalCost.transport;
+    const days = itin.duration_days || itin.days.length || 1;
+    const bl = itin.budget_level || chatData.budget_level;
+    const DAILY_BUDGET_USD = itin?.daily_budget_usd || chatData.budget_usd_per_day?.max || TIER_DAILY_BUDGET_USD[bl] || 8;
+
+    let activitiesUSD = 0;
+    const paidStops = [];
+    const freeStops = [];
+
+    itin.days.forEach(day => {
+      (day.stops || []).forEach(stop => {
+        const fee = (
+          stop.cost_usd !== null
+          && stop.cost_usd !== undefined
+          && !Number.isNaN(Number(stop.cost_usd))
+        ) ? Number(stop.cost_usd) : 0;
+
+        if (fee > 0) {
+          activitiesUSD += fee;
+          paidStops.push({ name: stop.name, fee, day: day.day });
+        } else {
+          freeStops.push(stop.name);
+        }
+      });
+    });
+
+    const transportUSD = itin.total_transport_usd
+      || itin.transport_summary?.total_usd
+      || (() => {
+        const COST_PER_KM = {
+          Budget: 0.008,
+          Relaxed: 0.025,
+          Luxury: 0.07,
+          Ultra: 0.14,
+        };
+        const BASE = {
+          Budget: 0.30,
+          Relaxed: 0.60,
+          Luxury: 1.20,
+          Ultra: 3.00,
+        };
+        let km = 0;
+        itin.days.forEach(day => {
+          (day.stops || []).forEach(stop => {
+            const d = parseFloat(stop._distFromPrev || 0);
+            if (d > 0) km += d;
+          });
+        });
+        return (km * (COST_PER_KM[bl] || 0.008)) + ((BASE[bl] || 0.30) * days);
+      })();
+
+    const MEAL_COST_PER_DAY = {
+      Budget: 2.0,
+      Relaxed: 6.0,
+      Luxury: 12.0,
+      Ultra: 25.0,
+    };
+    const foodUSD = (MEAL_COST_PER_DAY[bl] || 2.0) * days;
+
+    const HOTEL_PER_NIGHT = {
+      Budget: 4,
+      Relaxed: 12,
+      Luxury: 25,
+      Ultra: 60,
+    };
+    const hotelUSD = (HOTEL_PER_NIGHT[bl] || 4) * days;
+
+    const totalEstimatedUSD = hotelUSD + foodUSD + activitiesUSD + transportUSD;
+
+    return {
+      hotels: hotelUSD,
+      food: foodUSD,
+      activities: activitiesUSD,
+      transport: transportUSD,
+      totalUSD: totalEstimatedUSD,
+      dailyUSD: DAILY_BUDGET_USD,
+      days,
+      totalKm: itin.transport_summary?.total_km || 0,
+      hotelPerNight: HOTEL_PER_NIGHT[bl] || 4,
+      foodPerDay: MEAL_COST_PER_DAY[bl] || 2,
+      transportPerDay: transportUSD / Math.max(1, days),
+      activitiesTotal: activitiesUSD,
+      paidStops,
+      freeStops,
+      freeStopsCount: freeStops.length,
+      paidStopsCount: paidStops.length,
+      transportMode: itin.transport_summary?.mode || 'Bus/Metro',
+    };
+  }, [itin, chatData]);
+
+  const grandTotal = totalCost.totalUSD || 0;
   const profileStats = useMemo(() => computeStats(savedTrips), [savedTrips]);
   const recentTrips = useMemo(() => [...savedTrips].slice(-3).reverse(), [savedTrips]);
 
@@ -566,12 +821,601 @@ export default function App() {
     setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3500);
   }, []);
 
+  const loadSavedTrips = useCallback(async (authUser = user) => {
+    if (!authUser?.token || authUser?.isGuest) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/trips`, {
+        headers: { Authorization: `Bearer ${authUser.token}` }
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setSavedTrips(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('Could not load saved trips', e);
+    }
+  }, [user]);
+
+  const loadUserPreferences = useCallback(async (token) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/user/preferences`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) return;
+
+      const backendPrefs = await res.json();
+      const merged = {
+        ...defaultPrefs,
+        ...(backendPrefs || {}),
+        notifications: {
+          ...defaultPrefs.notifications,
+          ...((backendPrefs || {}).notifications || {})
+        }
+      };
+      setPrefs(merged);
+      localStorage.setItem(PREFS_KEY, JSON.stringify(merged));
+      localStorage.setItem(THEME_KEY, merged.theme);
+      applyTheme(merged.theme);
+      if (merged.currency) setActiveCur(merged.currency);
+      if (merged.pace) setActivePace(merged.pace);
+    } catch {
+      const local = localStorage.getItem(PREFS_KEY);
+      if (local) {
+        const parsed = JSON.parse(local);
+        setPrefs(parsed);
+        applyTheme(parsed.theme);
+      }
+    }
+  }, []);
+
+  const saveTrip = useCallback(async () => {
+    if (tripSaved || saving || !itin) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/trips`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${user?.token || ''}`
+        },
+        body: JSON.stringify({
+          origin: itin.origin,
+          destination: itin.destination,
+          duration_days: itin.duration_days,
+          destination_country: itin.destination_country,
+          local_currency: itin.local_currency,
+          center_lat: itin.center_lat,
+          center_lng: itin.center_lng,
+          vibes: itin.vibes || chatData.vibes,
+          group_type: itin.group_type || chatData.group_type,
+          budget_level: itin.budget_level || chatData.budget_level,
+          comfort_radius: itin.comfort_radius || chatData.comfort_radius,
+          itinerary: itin
+        })
+      });
+      if (!res.ok) throw new Error('Save failed');
+      const saved = await res.json();
+      setTripSaved(true);
+      setSavedTrips(p => [saved, ...p]);
+      showToast('✓ Trip saved to My Trips!');
+    } catch {
+      showToast('⚠️ Could not save trip — try again', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }, [tripSaved, saving, itin, user, chatData, showToast]);
+
+  const savePreferences = useCallback(async () => {
+    setSavingPrefs(true);
+    try {
+      const prefsToSave = {
+        defaultOrigin: prefs.defaultOrigin,
+        defaultVibes: prefs.defaultVibes,
+        defaultGroup: prefs.defaultGroup,
+        currency: prefs.currency,
+        theme: prefs.theme,
+        pace: prefs.pace,
+        distanceUnit: prefs.distanceUnit,
+        tempUnit: prefs.tempUnit,
+      };
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefsToSave));
+      localStorage.setItem(THEME_KEY, prefsToSave.theme);
+
+      if (user?.token && !user?.isGuest) {
+        const res = await fetch(`${API_BASE}/api/user/preferences`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${user.token}`
+          },
+          body: JSON.stringify(prefsToSave)
+        });
+        if (!res.ok) throw new Error('Backend save failed');
+      }
+
+      setPrefsSaved(true);
+      setPrefsDirty(false);
+      showToast('✓ Preferences saved!');
+    } catch {
+      setPrefsSaved(true);
+      setPrefsDirty(false);
+      showToast('✓ Preferences saved locally');
+    } finally {
+      setSavingPrefs(false);
+    }
+  }, [prefs, user, showToast]);
+
+  const saveSettings = useCallback(async () => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+      localStorage.setItem(THEME_KEY, prefs.theme);
+
+      if (user?.token && !user?.isGuest) {
+        await fetch(`${API_BASE}/api/user/preferences`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${user.token}`
+          },
+          body: JSON.stringify(prefs)
+        });
+      }
+
+      setSettingsDirty(false);
+      setSettingsSaved(true);
+      showToast('✓ Settings saved!');
+      setTimeout(() => setSettingsSaved(false), 3000);
+    } catch {
+      setSettingsDirty(false);
+      setSettingsSaved(true);
+      showToast('✓ Settings saved to this device');
+    }
+  }, [prefs, user, showToast]);
+
+  const updateSetting = useCallback((key, value) => {
+    setPrefs(p => ({ ...p, [key]: value }));
+    setSettingsDirty(true);
+    setSettingsSaved(false);
+    if (key === 'theme') applyTheme(value);
+  }, []);
+
+  const saveName = useCallback(async () => {
+    if (!nameInput.trim() || nameInput.trim() === user?.name) {
+      setEditingName(false);
+      return;
+    }
+    setSavingName(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/user/profile`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${user?.token || ''}`
+        },
+        body: JSON.stringify({ name: nameInput.trim() })
+      });
+      if (!res.ok) throw new Error('Update failed');
+
+      const updatedUser = { ...user, name: nameInput.trim() };
+      if (!user?.isGuest) {
+        localStorage.setItem('travelUser', JSON.stringify(updatedUser));
+      }
+      setUser(updatedUser);
+      setEditingName(false);
+      showToast('✓ Name updated successfully!');
+    } catch {
+      const updatedUser = { ...user, name: nameInput.trim() };
+      if (updatedUser?.isGuest) {
+        sessionStorage.setItem('travelGuest', JSON.stringify(updatedUser));
+      } else {
+        localStorage.setItem('travelUser', JSON.stringify(updatedUser));
+      }
+      setUser(updatedUser);
+      setEditingName(false);
+      showToast('✓ Name updated locally');
+    } finally {
+      setSavingName(false);
+    }
+  }, [nameInput, user, showToast]);
+
+  const handleNewTrip = () => {
+    if (itin && !tripSaved) {
+      setUnsavedModal(true);
+    } else {
+      startNew(0, true);
+    }
+  };
+
+  const openSavedTrips = useCallback(() => {
+    loadSavedTrips();
+    setPage('saved');
+  }, [loadSavedTrips]);
+
+  const loadSavedTrip = useCallback((trip) => {
+    const loadedTrip = trip.itinerary || trip;
+    const normalized = {
+      ...loadedTrip,
+      days:(loadedTrip.days||[]).map(day=>({ ...day, stops:nearestNeighborSort((day.stops||[]).slice(0,4)) }))
+    };
+    setItin(normalized);
+    setActiveDay(1);
+    setActivePace('balanced');
+    setActiveTab('itinerary');
+    setTripSaved(true);
+    setMapMounted(false);
+    setTimeout(() => setPage('itinerary'), 50);
+  }, []);
+
+  const deleteTrip = useCallback(async (tripId) => {
+    setDeletingTripId(tripId);
+    try {
+      if (user?.token && !user?.isGuest) {
+        const res = await fetch(`${API_BASE}/api/trips/${tripId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (!res.ok) throw new Error('Delete failed');
+      }
+
+      setSavedTrips(p => p.filter(t => t.id !== tripId));
+      showToast('🗑️ Trip deleted');
+    } catch (e) {
+      setSavedTrips(p => p.filter(t => t.id !== tripId));
+      showToast('Trip removed locally', 'error');
+    } finally {
+      setDeletingTripId(null);
+    }
+  }, [user, showToast]);
+
+  const clearAllTrips = useCallback(async () => {
+    setClearingHistory(true);
+    try {
+      if (user?.token && !user?.isGuest) {
+        const res = await fetch(`${API_BASE}/api/trips/clear-all`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${user.token}` }
+        });
+        if (!res.ok) throw new Error('Clear failed');
+      }
+
+      setSavedTrips([]);
+      setClearHistoryConfirm(false);
+      setDeleteConfirmId(null);
+      showToast('✓ Trip history cleared');
+    } catch (e) {
+      setSavedTrips([]);
+      setClearHistoryConfirm(false);
+      setDeleteConfirmId(null);
+      showToast('✓ Cleared locally');
+    } finally {
+      setClearingHistory(false);
+    }
+  }, [user, showToast]);
+
+  const buildGoogleHotelsUrl = useCallback((destination, budgetLevel, checkIn, nights) => {
+    const cap = HOTEL_INR_CAPS[budgetLevel] || HOTEL_INR_CAPS.Budget;
+
+    const today = new Date();
+    const ci = checkIn ? new Date(checkIn) : new Date(today);
+    if (!checkIn) ci.setDate(today.getDate() + 7);
+    const co = new Date(ci);
+    co.setDate(ci.getDate() + (nights || 1));
+
+    const fmt = d => `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}`;
+
+    return `https://www.google.com/travel/hotels/search?q=hotels+in+${encodeURIComponent(destination || '')}&checkin=${fmt(ci)}&checkout=${fmt(co)}&price_max=${cap.max}&price_min=${cap.min}&currency=INR`;
+  }, []);
+
+  const renderHotelSection = useCallback((day, itinData, budgetLevel) => {
+    const cap = HOTEL_INR_CAPS[budgetLevel] || HOTEL_INR_CAPS.Budget;
+    const dest = itinData?.destination || '';
+    const nights = itinData?.duration_days || 1;
+    const googleHotelsUrl = buildGoogleHotelsUrl(dest, budgetLevel, null, nights);
+    const realHotels = (day?.hotels || []).filter(h => h?.verified);
+
+    const areaEntry = Object.entries(BUDGET_AREAS).find(([city]) =>
+      dest.toLowerCase().includes(city.toLowerCase())
+    );
+    const areas = areaEntry?.[1] || [];
+
+    const platforms = [
+      {
+        name: 'Google Hotels',
+        icon: '🔍',
+        color: '#4285F4',
+        bg: 'rgba(66,133,244,0.1)',
+        border: 'rgba(66,133,244,0.25)',
+        url: googleHotelsUrl,
+        desc: 'Live prices, real photos, instant booking'
+      },
+      {
+        name: 'MakeMyTrip',
+        icon: '🏨',
+        color: '#E8334A',
+        bg: 'rgba(232,51,74,0.1)',
+        border: 'rgba(232,51,74,0.25)',
+        url: `https://www.makemytrip.com/hotels/hotel-listing/?checkin=03212026&checkout=03222026&roomcount=1&city=${encodeURIComponent(dest)}&country=IN&budgetMax=${cap.max}`,
+        desc: 'Best deals for Indian travellers'
+      },
+      {
+        name: 'OYO Rooms',
+        icon: '🛏️',
+        color: '#EE2E24',
+        bg: 'rgba(238,46,36,0.1)',
+        border: 'rgba(238,46,36,0.25)',
+        url: `https://www.oyorooms.com/search/?location=${encodeURIComponent(dest)}&budget_max=${cap.max}`,
+        desc: `Budget stays ${cap.label}`
+      },
+      {
+        name: 'Zostel',
+        icon: '🎒',
+        color: '#10B981',
+        bg: 'rgba(16,185,129,0.1)',
+        border: 'rgba(16,185,129,0.2)',
+        url: `https://www.zostel.com/zostel/${String(dest || '').toLowerCase().replace(/\s+/g,'-')}/`,
+        desc: 'Backpacker hostels & social stays'
+      },
+      {
+        name: 'Booking.com',
+        icon: '🌐',
+        color: '#003580',
+        bg: 'rgba(0,53,128,0.1)',
+        border: 'rgba(0,53,128,0.25)',
+        url: `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(dest)}&price_max=${cap.max}&nflt=price%3D0-${cap.max}`,
+        desc: 'Free cancellation options available'
+      },
+    ];
+
+    return (
+      <div style={{ marginTop:24 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+          <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1 }}>🏨 Where to Stay Tonight</h4>
+          <span style={{ fontSize:11, color:'#64748B', background:'#1E293B', border:'1px solid #334155', padding:'3px 8px', borderRadius:20 }}>{cap.label}</span>
+        </div>
+
+        {realHotels.length > 0 && (
+          <div style={{ marginBottom:12 }}>
+            <p style={{ fontSize:11, color:'#64748B', marginBottom:8 }}>✓ Verified stays nearby:</p>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+              {realHotels.slice(0, 4).map((h, i) => (
+                <div
+                  key={`${h.place_id || h.name || 'hotel'}-${i}`}
+                  style={{
+                    display:'block', background:'#1E293B', border:'1px solid #334155', borderRadius:12,
+                    padding:10, color:'#F1F5F9', position:'relative', overflow:'visible'
+                  }}
+                >
+                  {h.photo_url && (
+                    <img
+                      src={h.photo_url}
+                      alt={h.name}
+                      style={{ width:'100%', height:72, objectFit:'cover', borderRadius:8, marginBottom:8 }}
+                      onError={e => { e.currentTarget.style.display = 'none'; }}
+                    />
+                  )}
+                  <div style={{ fontSize:12, fontWeight:500, marginBottom:3 }}>{h.name}</div>
+                  <div style={{ fontSize:10, color:'#64748B', marginBottom:4 }}>
+                    {typeof h.rating === 'number' ? `★ ${h.rating}` : 'No rating'}
+                    {h.user_ratings_total ? ` (${Number(h.user_ratings_total).toLocaleString()})` : ''}
+                  </div>
+                  <div style={{ fontSize:12, color:'#F59E0B' }}>
+                    ₹{h.price_inr || Math.round((h.price_usd || 6) * 83.5)} / night
+                  </div>
+
+                  <HotelBookingDropdown hotel={h} destination={itinData?.destination} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {areas.length > 0 && (
+          <div style={{ marginBottom:12 }}>
+            <p style={{ fontSize:11, color:'#64748B', marginBottom:8 }}>💡 Budget-friendly areas in {dest}:</p>
+            <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+              {areas.map(area => (
+                <a
+                  key={area}
+                  href={`https://www.google.com/travel/hotels/search?q=hotels+in+${encodeURIComponent(`${area} ${dest}`)}&price_max=${cap.max}&currency=INR`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    background:'rgba(99,102,241,0.08)', border:'1px solid rgba(99,102,241,0.2)',
+                    color:'#A5B4FC', fontSize:11, padding:'4px 10px', borderRadius:20,
+                    textDecoration:'none', transition:'all 0.2s'
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(99,102,241,0.18)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(99,102,241,0.08)'}
+                >
+                  📍 {area} ↗
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <a
+          href={googleHotelsUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            display:'flex', alignItems:'center', gap:14, padding:'14px 16px',
+            background:'rgba(66,133,244,0.08)', border:'1.5px solid rgba(66,133,244,0.3)',
+            borderRadius:14, textDecoration:'none', marginBottom:12, transition:'all 0.2s', cursor:'pointer'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(66,133,244,0.14)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'rgba(66,133,244,0.08)'}
+        >
+          <div style={{ width:42, height:42, borderRadius:10, background:'rgba(66,133,244,0.15)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, flexShrink:0 }}>🔍</div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontWeight:500, fontSize:14, color:'#F1F5F9', marginBottom:2 }}>Search Real Hotels in {dest}</div>
+            <div style={{ fontSize:12, color:'#64748B' }}>Live prices · Real photos · {cap.label}</div>
+          </div>
+          <div style={{ fontSize:12, color:'#60A5FA', fontWeight:500, flexShrink:0 }}>Open ↗</div>
+        </a>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+          {platforms.slice(1).map(p => (
+            <a
+              key={p.name}
+              href={p.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display:'flex', alignItems:'center', gap:10, padding:'11px 12px',
+                background:p.bg, border:`1px solid ${p.border}`, borderRadius:12,
+                textDecoration:'none', transition:'all 0.2s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+              onMouseLeave={e => e.currentTarget.style.transform = 'none'}
+            >
+              <span style={{ fontSize:20 }}>{p.icon}</span>
+              <div>
+                <div style={{ fontSize:12, fontWeight:500, color:p.color, marginBottom:1 }}>{p.name}</div>
+                <div style={{ fontSize:10, color:'#64748B' }}>{p.desc}</div>
+              </div>
+            </a>
+          ))}
+        </div>
+
+        <div style={{ marginTop:12, padding:'10px 12px', background:'rgba(99,102,241,0.06)', border:'1px solid rgba(99,102,241,0.15)', borderRadius:10, fontSize:11, color:'#64748B', lineHeight:1.6 }}>
+          💡 We link to live hotel search so you always see real availability and current prices — not outdated suggestions.
+        </div>
+      </div>
+    );
+  }, [buildGoogleHotelsUrl]);
+
+  const renderFoodCard = useCallback((food, index) => {
+    const googleMapsUrl = food.maps_url || (
+      food.lat && food.lng
+        ? `https://www.google.com/maps/search/?api=1&query=${food.lat},${food.lng}`
+        : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${food.restaurant || food.name || 'restaurant'} ${itin?.destination || ''}`.trim())}`
+    );
+
+    const googleSearchUrl = food.google_search_url || `https://www.google.com/search?q=${encodeURIComponent(`${food.restaurant || food.name || 'restaurant'} ${itin?.destination || ''} restaurant`.trim())}`;
+
+    return (
+      <div
+        key={index}
+        className="food-card"
+        style={{ position:'relative', cursor:'pointer' }}
+        onClick={() => window.open(googleMapsUrl, '_blank')}
+      >
+        {food.photo_url ? (
+          <img
+            src={food.photo_url}
+            alt={food.name}
+            style={{ width:'100%', height:100, objectFit:'cover', borderRadius:8, marginBottom:10 }}
+            onError={e => { e.currentTarget.style.display = 'none'; }}
+          />
+        ) : (
+          <div style={{ fontSize:32, marginBottom:8, textAlign:'center' }}>{food.emoji}</div>
+        )}
+
+        {food.verified && (
+          <div style={{
+            position:'absolute', top:8, left:8,
+            background:'rgba(16,185,129,0.9)', color:'white',
+            fontSize:9, padding:'2px 6px', borderRadius:20, fontWeight:600
+          }}>
+            ✓ REAL
+          </div>
+        )}
+
+        <div style={{
+          position:'absolute', top:8, right:8,
+          background:'rgba(15,23,42,0.85)',
+          color:'#64748B', fontSize:10,
+          padding:'2px 6px', borderRadius:20
+        }}>#{index+1}</div>
+
+        <div style={{ fontWeight:500, fontSize:14, marginBottom:2 }}>{food.name}</div>
+        <div style={{ color:'#64748B', fontSize:11, marginBottom:4 }}>
+          {food.address ? String(food.address).split(',').slice(0,2).join(',') : food.restaurant}
+        </div>
+
+        {food.rating && (
+          <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:8 }}>
+            <span style={{ color:'#F59E0B', fontSize:12 }}>★</span>
+            <span style={{ fontSize:12, fontWeight:500 }}>{food.rating}</span>
+            {food.user_ratings_total > 0 && (
+              <span style={{ fontSize:11, color:'#64748B' }}>
+                ({Number(food.user_ratings_total).toLocaleString()} reviews)
+              </span>
+            )}
+          </div>
+        )}
+
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+          <span style={{ color:'#F59E0B', fontWeight:500 }}>₹{food.cost_inr || Math.round((food.cost_usd || 2) * 83.5)}</span>
+          <span style={{
+            background:'rgba(16,185,129,0.1)', color:'#10B981',
+            fontSize:10, padding:'2px 8px', borderRadius:20
+          }}>
+            {food.meal_type}
+          </span>
+        </div>
+
+        {food.is_open_now !== undefined && (
+          <div style={{ fontSize:10, marginBottom:8, color: food.is_open_now ? '#10B981' : '#F87171' }}>
+            {food.is_open_now ? '🟢 Open now' : '🔴 Currently closed'}
+          </div>
+        )}
+
+        <div style={{ display:'flex', gap:6 }}>
+          <a
+            href={googleMapsUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={e => e.stopPropagation()}
+            style={{
+              flex:1, textAlign:'center',
+              padding:'7px 8px',
+              background:'rgba(16,185,129,0.1)',
+              border:'1px solid rgba(16,185,129,0.2)',
+              color:'#10B981', borderRadius:8,
+              fontSize:11, textDecoration:'none', fontWeight:500
+            }}
+          >
+            📍 Maps
+          </a>
+          <a
+            href={googleSearchUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={e => e.stopPropagation()}
+            style={{
+              flex:1, textAlign:'center',
+              padding:'7px 8px',
+              background:'rgba(99,102,241,0.1)',
+              border:'1px solid rgba(99,102,241,0.2)',
+              color:'#A5B4FC', borderRadius:8,
+              fontSize:11, textDecoration:'none', fontWeight:500
+            }}
+          >
+            🔍 Search
+          </a>
+        </div>
+      </div>
+    );
+  }, [itin]);
+
   // ── Effects ──
   useEffect(() => {
     const su = localStorage.getItem('travelUser');
     const gu = sessionStorage.getItem('travelGuest');
-    if (su) { const u = JSON.parse(su); setUser(u); setProfileName(u?.name || ''); setPage('dashboard'); }
-    else if (gu) { const u = JSON.parse(gu); setUser(u); setProfileName(u?.name || ''); setPage('dashboard'); }
+    if (su) {
+      const u = JSON.parse(su);
+      setUser(u);
+      setNameInput(u?.name || '');
+      setPage('dashboard');
+      if (!u.isGuest) loadUserPreferences(u.token);
+    } else if (gu) {
+      const u = JSON.parse(gu);
+      setUser(u);
+      setNameInput(u?.name || '');
+      setPage('dashboard');
+    }
 
     const savedPrefsRaw = localStorage.getItem(PREFS_KEY);
     const savedTheme = localStorage.getItem(THEME_KEY);
@@ -606,18 +1450,22 @@ export default function App() {
     ls.async = true;
     ls.onload = () => setMapReady(true);
     document.head.appendChild(ls);
-  }, []);
+  }, [loadUserPreferences]);
 
   useEffect(() => {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-    localStorage.setItem(THEME_KEY, prefs.theme);
     applyTheme(prefs.theme);
   }, [prefs]);
 
   useEffect(() => {
+    if (user && !user.isGuest) {
+      loadSavedTrips(user);
+      setNameInput(user?.name || '');
+    }
+  }, [user, loadSavedTrips]);
+
+  useEffect(() => {
     setRankBy('recommended');
-    setRankSection(rankTarget === 'stops' ? 'all' : rankTarget);
-  }, [activeTab, rankTarget]);
+  }, [activeTab]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -638,6 +1486,7 @@ export default function App() {
       if (e.key === 'Escape') {
         if (drawer) { setDrawer(null); setActiveStop(null); }
         if (resetModal) setResetModal(false);
+        if (unsavedModal) setUnsavedModal(false);
         if (dropdownOpen) setDropdownOpen(false);
         if (deleteModal) setDeleteModal('');
       }
@@ -651,22 +1500,25 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [drawer, resetModal, activeDay, page, itin, dropdownOpen, deleteModal]);
+  }, [drawer, resetModal, unsavedModal, activeDay, page, itin, dropdownOpen, deleteModal]);
 
   useEffect(() => {
     if (page === 'saved') {
+      if (user && !user.isGuest) {
+        loadSavedTrips(user);
+      }
       setSavedLoading(true);
       const t = setTimeout(() => setSavedLoading(false), 900);
       return () => clearTimeout(t);
     }
     return undefined;
-  }, [page]);
+  }, [page, user, loadSavedTrips]);
 
   useEffect(() => {
     if (page === 'chat' && history.length === 0) {
       setTimeout(() => setHistory([{ from:'bot', text: QUESTIONS[0] }]), 400);
     }
-  }, [page]);
+  }, [page, QUESTIONS, history.length]);
 
   useEffect(() => {
     if (page === 'chat' && qIdx === 0 && chatData.origin && !textInput) {
@@ -703,32 +1555,68 @@ export default function App() {
     }, 350);
   }, [textInput, page, qIdx]);
 
-  // Map init / update on activeDay change
+  // Map init for itinerary render/load.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (page !== 'itinerary' || !mapReady || !mapEl.current || !itin) return;
-    const L = window.L;
-    if (!L) return;
+    if (page !== 'itinerary') return;
+    if (!mapReady || !itin || !mapMounted) return;
+    if (!mapEl.current) return;
 
-    const initMap = () => {
-      if (!mapRef.current) {
-        mapRef.current = L.map(mapEl.current, { zoomControl: false }).setView([itin.center_lat||20, itin.center_lng||0], 12);
+    if (mapRef.current) {
+      try { mapRef.current.remove(); } catch (e) {}
+      mapRef.current = null;
+      markersRef.current = {};
+      polylinesRef.current = [];
+    }
+
+    const timer = setTimeout(() => {
+      try {
+        const L = window.L;
+        if (!L || !mapEl.current) return;
+
+        const centerLat = itin.center_lat || itin.days?.[0]?.stops?.[0]?.lat || 20;
+        const centerLng = itin.center_lng || itin.days?.[0]?.stops?.[0]?.lng || 0;
+
+        mapRef.current = L.map(mapEl.current, { zoomControl: false }).setView([centerLat, centerLng], 12);
         updateMapLayer(L);
         L.control.zoom({ position:'bottomright' }).addTo(mapRef.current);
+
+        setTimeout(() => {
+          mapRef.current?.invalidateSize();
+          renderDayOnMap(L);
+        }, 100);
+      } catch (e) {
+        console.error('Map init error:', e);
       }
-      renderDayOnMap(L);
-    };
+    }, 150);
 
-    try { initMap(); } catch(e) { console.error(e); }
-  }, [page, mapReady, itin]);
+    return () => clearTimeout(timer);
+  }, [page, mapReady, itin, mapMounted]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!mapRef.current || !itin || !mapReady) return;
     const L = window.L;
     if (!L) return;
-    try { renderDayOnMap(L); } catch(e) {}
-  }, [activeDay, mapLayer]);
+    try {
+      mapRef.current.invalidateSize();
+      renderDayOnMap(L);
+    } catch(e) {}
+  }, [activeDay, mapLayer]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const updateMapLayer = (L) => {
+  useEffect(() => {
+    if (page !== 'itinerary') {
+      setMapMounted(false);
+      if (mapRef.current) {
+        try { mapRef.current.remove(); } catch (e) {}
+        mapRef.current = null;
+      }
+      markersRef.current = {};
+      polylinesRef.current = [];
+    }
+  }, [page]);
+
+  const updateMapLayer = useCallback((L) => {
     if (!mapRef.current) return;
     mapRef.current.eachLayer(l => { if (l._url) mapRef.current.removeLayer(l); });
     const tiles = {
@@ -737,7 +1625,7 @@ export default function App() {
       satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
     };
     L.tileLayer(tiles[mapLayer] || tiles.dark, { attribution:'© Map', maxZoom:19 }).addTo(mapRef.current);
-  };
+  }, [mapLayer]);
 
   const renderDayOnMap = useCallback((L) => {
     if (!mapRef.current || !itin) return;
@@ -786,7 +1674,7 @@ export default function App() {
 
     if (bounds.length > 1) mapRef.current.fitBounds(bounds, { padding:[60,60] });
     else if (bounds.length === 1) mapRef.current.setView(bounds[0], 14);
-  }, [itin, activeDay, activeStop, transportModes, mapLayer]);
+  }, [itin, activeDay, activeStop, transportModes, updateMapLayer]);
 
   // ── Auth ──
   const handleAuth = async () => {
@@ -807,7 +1695,7 @@ export default function App() {
       const ep = authTab==='login' ? '/api/auth/login' : '/api/auth/register';
       const body = authTab==='login' ? { email:authForm.email, password:authForm.password }
         : { name:authForm.name, email:authForm.email, password:authForm.password };
-      const res = await fetch(`http://localhost:8000${ep}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const res = await fetch(`${API_BASE}${ep}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
       if (!res.ok) {
         let msg = 'Authentication failed';
         try {
@@ -826,13 +1714,15 @@ export default function App() {
       const sess = { userId:d.user_id||d.userId, token:d.access_token||d.token, name:d.name, email:authForm.email, isGuest:false };
       localStorage.setItem('travelUser', JSON.stringify(sess));
       setUser(sess);
-      setProfileName(sess.name || '');
+      setNameInput(sess.name || '');
+      await loadUserPreferences(sess.token);
+      await loadSavedTrips(sess);
       showToast('✓ Logged in successfully');
       navigateTo('dashboard');
     } catch(e) {
       const msg = String(e?.message || 'Authentication failed');
       if (msg.toLowerCase().includes('failed to fetch')) {
-        setAuthErr('Cannot reach backend at http://localhost:8000. Make sure FastAPI is running.');
+        setAuthErr(`Cannot reach backend at ${API_BASE}. Make sure FastAPI is running.`);
       } else {
         setAuthErr(msg);
       }
@@ -843,7 +1733,7 @@ export default function App() {
     const sess = { userId:`gst_${Date.now()}`, token:'', name:'Explorer', isGuest:true };
     sessionStorage.setItem('travelGuest', JSON.stringify(sess));
     setUser(sess);
-    setProfileName(sess.name || 'Explorer');
+    setNameInput(sess.name || 'Explorer');
     navigateTo('dashboard');
   };
 
@@ -906,7 +1796,7 @@ export default function App() {
   const buildIt = async () => {
     setError(null); setLoading(true); setLoadIdx(0); setLoadProg(0);
     try {
-      const res = await fetch('http://localhost:8000/api/plan', {
+      const res = await fetch(`${API_BASE}/api/plan`, {
         method:'POST',
         headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${user?.token||''}` },
         body: JSON.stringify({
@@ -924,6 +1814,14 @@ export default function App() {
       setLoadProg(100);
       setTimeout(() => setLoading(false), 300);
       const trip = data.trip;
+      trip.budget_level = chatData.budget_level;
+      trip.daily_budget_usd = (() => {
+        if (chatData.budget_usd_per_day?.max) return chatData.budget_usd_per_day.max;
+        return TIER_DAILY_BUDGET_USD[chatData.budget_level] || 8;
+      })();
+      trip.vibes = chatData.vibes;
+      trip.group_type = chatData.group_type;
+      trip.comfort_radius = chatData.comfort_radius;
       const optimizedTrip = {
         ...trip,
         days: (trip.days || []).map(day => ({
@@ -932,6 +1830,7 @@ export default function App() {
         }))
       };
       setItin(optimizedTrip);
+      setTripSaved(false);
       setActiveDay(1);
       setActiveCur(prefs.currency || (trip.local_currency in EXCHANGE ? trip.local_currency : 'USD'));
       setActivePace(prefs.pace || 'balanced');
@@ -972,12 +1871,14 @@ export default function App() {
       vibes:[...(prefs.defaultVibes || [])],
       group_type:prefs.defaultGroup || '',
       budget_level:'',
+      budget_usd_per_day:null,
       special_requests:''
     });
     setHistory([]); setQIdx(0); setItin(null); setWeather(null);
     setSugg([]); setError(null); setTextInput(''); setReadyBuild(false);
     setCustomBudget(''); setShowCustomBudget(false);
     setActiveDay(1); setCompletedStops({}); setDrawer(null); setActiveStop(null);
+    setTripSaved(false); setSaving(false); setUnsavedModal(false);
     showToast('↺ Trip reset');
     navigateTo('chat');
   };
@@ -1015,21 +1916,16 @@ export default function App() {
   const submitCustomBudget = () => {
     const amount = Number(customBudget);
     if (!Number.isFinite(amount) || amount < 1 || amount > 10000) return;
-    setChatData(p => ({ ...p, budget_level: `Custom: $${amount}/day` }));
+    const mappedTier = budgetTierFromAmount(amount);
+    setChatData(p => ({
+      ...p,
+      budget_level: mappedTier,
+      budget_usd_per_day: { min: amount, max: amount }
+    }));
     addMsg('user', `💵 Custom budget: $${amount}/day`);
     setShowCustomBudget(false);
     setCustomBudget('');
     advanceQ(7);
-  };
-
-  const saveProfileName = () => {
-    if (!profileName.trim()) return;
-    const nextUser = { ...(user || {}), name: profileName.trim() };
-    setUser(nextUser);
-    if (nextUser.isGuest) sessionStorage.setItem('travelGuest', JSON.stringify(nextUser));
-    else localStorage.setItem('travelUser', JSON.stringify(nextUser));
-    setProfileNameEdit(false);
-    showToast('✓ Profile updated');
   };
 
   const exportMyData = () => {
@@ -1045,12 +1941,6 @@ export default function App() {
     a.download = 'travelmind-data.json';
     a.click();
     URL.revokeObjectURL(url);
-  };
-
-  const clearTripHistory = () => {
-    setSavedTrips([]);
-    setDeleteModal('');
-    showToast('↺ Trip history cleared');
   };
 
   // ─── RENDER ────────────────────────────────────────────────────────────────
@@ -1216,15 +2106,15 @@ export default function App() {
       {page==='dashboard' && user && (
         <div className="fade-up" style={{ maxWidth:900, margin:'0 auto', padding:40 }}>
           {/* Navbar */}
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:48 }}>
+          <div className="navbar" style={{ position:'sticky', top:0, zIndex:1000, isolation:'isolate', background:'rgba(15,23,42,0.95)', backdropFilter:'blur(14px)', borderBottom:'1px solid #1E293B', padding:'0 20px', display:'flex', justifyContent:'space-between', alignItems:'center', height:56, marginBottom:48 }}>
             <span style={{ fontSize:20, fontWeight:500 }}>✈️ TravelMind</span>
             <div style={{ display:'flex', alignItems:'center', gap:12, position:'relative' }} ref={dropdownRef}>
-              <button className="btn-secondary" style={{ fontSize:13 }} onClick={()=>navigateTo('saved')}>My Trips</button>
+              <button className="btn-secondary" style={{ fontSize:13 }} onClick={openSavedTrips}>My Trips</button>
               <div style={{ width:36, height:36, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, fontWeight:600, cursor:'pointer' }} onClick={()=>setDropdownOpen(p=>!p)}>
                 {initials(user.name)}
               </div>
               {dropdownOpen && (
-                <div style={{ position:'absolute', top:52, right:16, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, boxShadow:'0 16px 48px rgba(0,0,0,0.5)', minWidth:220, animation:'fadeUp 0.2s ease', zIndex:300 }}>
+                <div className="dropdown" style={{ position:'fixed', top:56, right:16, zIndex:9999, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, minWidth:220, boxShadow:'0 16px 48px rgba(0,0,0,0.6)', animation:'fadeUp 0.2s ease' }}>
                   <div style={{ display:'flex', gap:10, alignItems:'center', padding:'8px 10px 10px' }}>
                     <div style={{ width:48, height:48, borderRadius:'50%', background:'linear-gradient(135deg,#6366F1,#0EA5E9)', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:600 }}>{initials(user?.name)}</div>
                     <div style={{ flex:1 }}>
@@ -1237,7 +2127,7 @@ export default function App() {
                   <div style={{ borderTop:'1px solid #334155', margin:'4px 0' }} />
                   {[
                     ['👤 My Profile', () => navigateTo('profile')],
-                    ['🗺️ My Trips', () => navigateTo('saved')],
+                    ['🗺️ My Trips', openSavedTrips],
                     ['⚙️ Settings', () => navigateTo('settings')],
                   ].map(([label, action]) => (
                     <div key={label} onClick={action} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
@@ -1266,7 +2156,7 @@ export default function App() {
               <h3 style={{ fontWeight:500, marginBottom:6 }}>Plan a new trip</h3>
               <p style={{ color:'rgba(255,255,255,0.7)', fontSize:13 }}>Chat with our AI to build your perfect itinerary</p>
             </div>
-            <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, cursor:'pointer' }} onClick={()=>navigateTo('saved')}>
+            <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, cursor:'pointer' }} onClick={openSavedTrips}>
               <div style={{ fontSize:32, marginBottom:12 }}>📚</div>
               <h3 style={{ fontWeight:500, marginBottom:6 }}>My saved trips</h3>
               <p style={{ color:'#64748B', fontSize:13 }}>View and revisit your past itineraries</p>
@@ -1470,7 +2360,11 @@ export default function App() {
                     <div
                       key={opt.value}
                       onClick={() => {
-                        setChatData(p => ({...p, budget_level: opt.value}));
+                        setChatData(p => ({
+                          ...p,
+                          budget_level: opt.value,
+                          budget_usd_per_day: budgetRangeMap[opt.value] || null,
+                        }));
                         addMsg('user', `${opt.icon} ${opt.label} — ${opt.range}/day (${opt.inr_range})`);
                         advanceQ(7);
                       }}
@@ -1585,9 +2479,9 @@ export default function App() {
       {page==='itinerary' && itin && (
         <div>
           {/* Navbar */}
-          <div style={{ position:'sticky', top:0, zIndex:50, background:'rgba(15,23,42,0.95)', backdropFilter:'blur(12px)', borderBottom:'1px solid #1E293B', padding:'0 20px', display:'flex', alignItems:'center', justifyContent:'space-between', height:56 }}>
+          <div className="navbar" style={{ position:'sticky', top:0, zIndex:1000, isolation:'isolate', background:'rgba(15,23,42,0.95)', backdropFilter:'blur(14px)', borderBottom:'1px solid #1E293B', padding:'0 20px', display:'flex', alignItems:'center', justifyContent:'space-between', height:56 }}>
             <div style={{ display:'flex', alignItems:'center', gap:16 }}>
-              <button className="btn-secondary" style={{ padding:'6px 12px', fontSize:13 }} onClick={()=>startNew(0)}>← New Trip</button>
+              <button className="btn-secondary" style={{ padding:'6px 12px', fontSize:13 }} onClick={handleNewTrip}>← New Trip</button>
               <span style={{ color:'#64748B', fontSize:13, display:'flex', alignItems:'center', gap:6 }}>
                 ✈️ <strong style={{ color:'#F1F5F9' }}>{itin.origin}</strong>
                 <span style={{ color:'#334155' }}>→</span>
@@ -1600,15 +2494,15 @@ export default function App() {
                   {wxFor(weather.current_weather.weathercode)?.e} {Math.round(weather.current_weather.temperature)}°C
                 </span>
               )}
-              <button className="btn-secondary" style={{ fontSize:13, padding:'6px 12px' }} onClick={()=>navigateTo('saved')}>My Trips</button>
+              <button className="btn-secondary" style={{ fontSize:13, padding:'6px 12px' }} onClick={openSavedTrips}>My Trips</button>
               <div style={{ width:32, height:32, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, cursor:'pointer' }} onClick={()=>setDropdownOpen(p=>!p)}>
                 {initials(user?.name)}
               </div>
               {dropdownOpen && (
-                <div style={{ position:'absolute', top:52, right:16, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, boxShadow:'0 16px 48px rgba(0,0,0,0.5)', minWidth:220, animation:'fadeUp 0.2s ease', zIndex:300 }}>
+                <div className="dropdown" style={{ position:'fixed', top:56, right:16, zIndex:9999, background:'#1E293B', border:'1px solid #334155', borderRadius:14, padding:8, minWidth:220, boxShadow:'0 16px 48px rgba(0,0,0,0.6)', animation:'fadeUp 0.2s ease' }}>
                   {[
                     ['👤 My Profile', () => navigateTo('profile')],
-                    ['🗺️ My Trips', () => navigateTo('saved')],
+                    ['🗺️ My Trips', openSavedTrips],
                     ['⚙️ Settings', () => navigateTo('settings')],
                   ].map(([label, action]) => (
                     <div key={label} onClick={action} style={{ padding:'10px 12px', cursor:'pointer', fontSize:14, borderRadius:8 }} onMouseEnter={(e)=>{e.currentTarget.style.background='#273549';}} onMouseLeave={(e)=>{e.currentTarget.style.background='transparent';}}>
@@ -1634,7 +2528,7 @@ export default function App() {
 
                 {/* Mood board pills */}
                 <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:12 }}>
-                  {[`✈️ ${itin.duration_days} Days`, `💰 ${SYM[activeCur]}${conv(grandTotal,activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || null) : null, budgetPillMap[itin.budget_level], `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
+                  {[`✈️ ${itin.duration_days} Days`, `💰 Budget: ${SYM[activeCur]}${conv((itin?.daily_budget_usd || 8) * (itin?.duration_days || 1),activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || null) : null, budgetPillMap[itin.budget_level], `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
                     <span key={i} style={{ background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.2)', color:'#A5B4FC', fontSize:11, padding:'4px 10px', borderRadius:20 }}>{pill}</span>
                   ))}
                 </div>
@@ -1647,7 +2541,31 @@ export default function App() {
                     </RippleBtn>
                   ))}
                   <div style={{ flex:1 }}/>
-                  <RippleBtn className="btn-secondary" style={{ fontSize:12, padding:'6px 12px' }} onClick={()=>startNew(0)}>↺ Replan</RippleBtn>
+                  {!tripSaved && (
+                    <RippleBtn
+                      onClick={saveTrip}
+                      style={{
+                        background: tripSaved
+                          ? 'rgba(16,185,129,0.15)'
+                          : 'linear-gradient(135deg,#10B981,#059669)',
+                        border: tripSaved ? '1px solid #10B981' : 'none',
+                        color: 'white',
+                        borderRadius: 10,
+                        padding: '8px 16px',
+                        fontSize: 13,
+                        fontWeight: 500,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        cursor: tripSaved ? 'default' : 'pointer',
+                        transition: 'all 0.3s'
+                      }}
+                      disabled={tripSaved || saving}
+                    >
+                      {saving ? '⏳ Saving...' : tripSaved ? '✓ Saved' : '💾 Save Trip'}
+                    </RippleBtn>
+                  )}
+                  <RippleBtn className="btn-secondary" style={{ fontSize:12, padding:'6px 12px' }} onClick={handleNewTrip}>↺ Replan</RippleBtn>
                 </div>
 
                 {/* Currency */}
@@ -1919,157 +2837,18 @@ export default function App() {
                           </div>
                         ) : (
                           <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                            {displayedFood.map((f,i)=>(
-                              <div key={i} className="food-card" style={{ position:'relative' }}>
-                                <div style={{ position:'absolute', top:8, right:8 }} onMouseEnter={() => setShowTooltip(`food-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
-                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 6px', borderRadius:20 }}>#{i+1}</div>
-                                  {showTooltip === `food-${i}` && i === 0 && (
-                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', right:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
-                                      {getRankReason(f, rankBy, 'food')}
-                                    </div>
-                                  )}
-                                </div>
-                                <div style={{ fontSize:28, marginBottom:8 }}>{f.emoji}</div>
-                                <div style={{ fontWeight:500, fontSize:14, marginBottom:4 }}>{f.name}</div>
-                                <div style={{ color:'#64748B', fontSize:11, marginBottom:8 }}>{f.restaurant}</div>
-                                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                                  <span style={{ color:'#F59E0B', fontWeight:500 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
-                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>{f.meal_type}</span>
-                                </div>
-                                {f._withinBudget ? (
-                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>✓ Within budget</span>
-                                ) : (
-                                  <span style={{ background:'rgba(245,158,11,0.1)', color:'#FCD34D', fontSize:10, padding:'2px 8px', borderRadius:20 }}>⚠️ Above budget</span>
-                                )}
-                                {f.rating && <div style={{ fontSize:11, color:'#64748B', marginTop:6 }}>{'★'.repeat(Math.round(f.rating))} {f.rating}</div>}
-                              </div>
-                            ))}
+                            {displayedFood.map((f,i)=>renderFoodCard(f, i))}
                           </div>
                         )}
                       </div>
                     )}
 
-                    {/* Hotels */}
-                    {(rankedHotels.length > 0 || (currentDayData?.hotels?.length || 0) > 0) && (
-                      <div style={{ marginTop:24 }}>
-                        <h4 style={{ color:'#64748B', fontSize:11, textTransform:'uppercase', letterSpacing:1, marginBottom:12 }}>🏨 Where to Stay Tonight</h4>
-                        <div style={{ fontSize:12, color:'#64748B', marginBottom:8 }}>
-                          🎯 Showing hotels for {itin?.budget_level || 'Relaxed'} budget · {HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.label}
-                        </div>
-                        {displayedHotels.length === 0 ? (
-                          <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
-                            <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
-                            <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
-                            <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
-                          </div>
-                        ) : (
-                          <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                            {displayedHotels.map((h,i)=>(
-                              <div key={i} className={`hotel-card${h.recommended?' recommended':''}`} style={{ position:'relative' }}>
-                                <div style={{ position:'absolute', top:10, left:12 }} onMouseEnter={() => setShowTooltip(`hotel-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
-                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 8px', borderRadius:20, fontWeight:600 }}>#{i + 1}</div>
-                                  {showTooltip === `hotel-${i}` && i === 0 && (
-                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', left:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
-                                      {getRankReason(h, rankBy, 'hotel')}
-                                    </div>
-                                  )}
-                                </div>
-                                {h.recommended && (
-                                  <div style={{ position:'absolute', top:-10, right:12, background:'#6366F1', color:'white', fontSize:10, padding:'3px 10px', borderRadius:20, fontWeight:500 }}>Best Value</div>
-                                )}
-                                {h._withinBudget ? (
-                                  <div style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8, marginTop:22 }}>✓ Within your budget</div>
-                                ) : (
-                                  <div style={{ background:'rgba(245,158,11,0.12)', color:'#FCD34D', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8, marginTop:22 }}>⚠️ Above your budget</div>
-                                )}
-                                <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
-                                <div style={{ color:'#F59E0B', fontSize:14, marginBottom:8 }}>{'★'.repeat(h.stars||3)}</div>
-                                <div style={{ fontSize:22, fontWeight:500, marginBottom:6 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:12, color:'#64748B', fontWeight:400 }}>/night</span></div>
-
-                                {(rankBy === 'budget_fit' || rankBy === 'recommended') && (
-                                  <div style={{ marginBottom:10 }}>
-                                    <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'#64748B', marginBottom:4 }}>
-                                      <span>Budget fit</span>
-                                      <span style={{ color: h._withinBudget ? '#10B981' : '#F87171' }}>
-                                        {(() => {
-                                          const cap = HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.max || 9999;
-                                          const fitPct = Math.min(100, Math.round((1 - ((h._price || 0) / cap)) * 100));
-                                          return h._withinBudget ? `${fitPct}% under cap` : 'Over budget';
-                                        })()}
-                                      </span>
-                                    </div>
-                                    <div style={{ height:3, borderRadius:999, background:'#334155' }}>
-                                      <div style={{ height:'100%', borderRadius:999, width:`${(() => {
-                                        const cap = HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.max || 9999;
-                                        const fitPct = Math.min(100, Math.round((1 - ((h._price || 0) / cap)) * 100));
-                                        return Math.max(0, fitPct);
-                                      })()}%`, background: h._withinBudget ? '#10B981' : '#F87171', transition:'width 0.4s ease' }}/>
-                                    </div>
-                                  </div>
-                                )}
-
-                                <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
-                                  {(h.amenities||[]).slice(0,3).map((a,ai)=>(
-                                    <span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'3px 8px', borderRadius:8 }}>{a}</span>
-                                  ))}
-                                </div>
-                                {h.distance_from_last_stop && <div style={{ fontSize:11, color:'#64748B', marginBottom:10 }}>📍 {h.distance_from_last_stop}</div>}
-                                <a href={h.booking_url||`https://www.google.com/search?q=${encodeURIComponent(h.name)}`} target="_blank" rel="noreferrer"
-                                  style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none', fontWeight:500 }}>
-                                  Book Now ↗
-                                </a>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    {renderHotelSection(currentDayData, itin, itin?.budget_level || 'Budget')}
                   </div>
                 )}
 
                 {/* ── HOTELS TAB ── */}
-                {activeTab==='hotels' && (
-                  <div>
-                    <div style={{ fontSize:12, color:'#64748B', marginBottom:10 }}>
-                      🎯 Showing hotels for {itin?.budget_level || 'Relaxed'} budget · {HOTEL_CAPS[itin?.budget_level || 'Relaxed']?.label}
-                    </div>
-                    {allHotels.length === 0 ? (
-                      <div style={{ textAlign:'center', padding:'24px 16px', background:'rgba(245,158,11,0.05)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:12 }}>
-                        <div style={{ fontSize:32, marginBottom:8 }}>🎯</div>
-                        <p style={{ fontSize:14, color:'#94A3B8', marginBottom:12 }}>No items match your comfort zone</p>
-                        <button className="btn-secondary" style={{ fontSize:12 }} onClick={() => setComfortFilter(false)}>Show all options</button>
-                      </div>
-                    ) : (
-                      <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:8 }}>
-                        {allHotels.map((h,i)=>(
-                          <div key={`${h.name}-${h._day}-${i}`} className={`hotel-card${h.recommended?' recommended':''}`} style={{ minWidth:220, position:'relative' }}>
-                            <div style={{ position:'absolute', top:10, left:12 }} onMouseEnter={() => setShowTooltip(`hotel-all-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
-                              <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 8px', borderRadius:20, fontWeight:600 }}>#{i+1}</div>
-                              {showTooltip === `hotel-all-${i}` && i === 0 && (
-                                <div style={{ position:'absolute', bottom:'calc(100% + 6px)', left:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
-                                  {getRankReason(h, rankBy, 'hotel')}
-                                </div>
-                              )}
-                            </div>
-                            <div style={{ fontSize:10, color:'#64748B', marginBottom:6, marginTop:18 }}>Day {h._day} · {h._dayTitle}</div>
-                            <div style={{ fontWeight:500, marginBottom:4 }}>{h.name}</div>
-                            <div style={{ color:'#F59E0B', fontSize:13, marginBottom:6 }}>{'★'.repeat(h.stars||3)} {h.rating ? `${h.rating}` : ''}</div>
-                            <div style={{ fontSize:20, fontWeight:500, marginBottom:8 }}>{SYM[activeCur]}{conv(h.price_usd,activeCur)}<span style={{ fontSize:11, color:'#64748B' }}>/night</span></div>
-                            <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:10 }}>
-                              {(h.amenities||[]).map((a,ai)=><span key={ai} style={{ background:'#273549', color:'#94A3B8', fontSize:10, padding:'2px 7px', borderRadius:6 }}>{a}</span>)}
-                            </div>
-                            {h._withinBudget ? (
-                              <div style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8 }}>✓ Within your budget</div>
-                            ) : (
-                              <div style={{ background:'rgba(245,158,11,0.12)', color:'#FCD34D', fontSize:10, padding:'3px 8px', borderRadius:20, marginBottom:8 }}>⚠️ Above your budget</div>
-                            )}
-                            <a href={h.booking_url||'#'} target="_blank" rel="noreferrer" style={{ display:'block', textAlign:'center', padding:'8px', background:'#6366F1', color:'white', borderRadius:8, fontSize:12, textDecoration:'none' }}>Book Now ↗</a>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                {activeTab==='hotels' && renderHotelSection(currentDayData, itin, itin?.budget_level || 'Budget')}
 
                 {/* ── FOOD TAB ── */}
                 {activeTab==='food' && (
@@ -2087,30 +2866,9 @@ export default function App() {
                           </div>
                           <div style={{ display:'flex', gap:10, overflowX:'auto', paddingBottom:6 }}>
                             {items.map((f, i) => (
-                              <div key={`${mealType}-${f.name}-${i}`} className="food-card" style={{ minWidth:210, position:'relative' }}>
-                                <div style={{ position:'absolute', top:8, right:8 }} onMouseEnter={() => setShowTooltip(`food-all-${mealType}-${i}`)} onMouseLeave={() => setShowTooltip(null)}>
-                                  <div style={{ background:'rgba(15,23,42,0.7)', color:'#64748B', fontSize:10, padding:'2px 6px', borderRadius:20 }}>#{i+1}</div>
-                                  {showTooltip === `food-all-${mealType}-${i}` && i === 0 && (
-                                    <div style={{ position:'absolute', bottom:'calc(100% + 6px)', right:0, background:'#0F172A', border:'1px solid #334155', borderRadius:8, padding:'6px 10px', fontSize:11, color:'#94A3B8', whiteSpace:'nowrap', zIndex:50, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', animation:'fadeUp 0.15s ease' }}>
-                                      {getRankReason(f, rankBy, 'food')}
-                                    </div>
-                                  )}
-                                </div>
+                              <div key={`${mealType}-${f.name}-${i}`} style={{ minWidth:210 }}>
                                 <div style={{ fontSize:10, color:'#64748B', marginBottom:6 }}>Day {f._day}</div>
-                                <div style={{ fontSize:24, marginBottom:6 }}>{f.emoji}</div>
-                                <div style={{ fontWeight:500, fontSize:13, marginBottom:2 }}>{f.name}</div>
-                                <div style={{ color:'#64748B', fontSize:11, marginBottom:6 }}>{f.restaurant}</div>
-                                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                                  <span style={{ color:'#F59E0B', fontWeight:500, fontSize:13 }}>{SYM[activeCur]}{conv(f.cost_usd,activeCur)}</span>
-                                  <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 7px', borderRadius:20 }}>{f.meal_type}</span>
-                                </div>
-                                <div style={{ marginTop:8 }}>
-                                  {f._withinBudget ? (
-                                    <span style={{ background:'rgba(16,185,129,0.1)', color:'#10B981', fontSize:10, padding:'2px 8px', borderRadius:20 }}>✓ Within budget</span>
-                                  ) : (
-                                    <span style={{ background:'rgba(245,158,11,0.1)', color:'#FCD34D', fontSize:10, padding:'2px 8px', borderRadius:20 }}>⚠️ Above budget</span>
-                                  )}
-                                </div>
+                                {renderFoodCard(f, i)}
                               </div>
                             ))}
                           </div>
@@ -2147,74 +2905,303 @@ export default function App() {
                 )}
               </div>
 
-              {/* Cost summary — sticky footer */}
-              <div style={{ borderTop:'1px solid #1E293B', padding:'14px 20px', background:'rgba(15,23,42,0.9)', backdropFilter:'blur(8px)' }}>
-                <div style={{ fontSize:11, color:'#64748B', marginBottom:8 }}>
-                  ← → Arrow keys to switch days • Esc to close
+              {/* COMPACT COST BAR — replaces full footer */}
+              <div style={{
+                borderTop:'1px solid #1E293B',
+                padding:'10px 20px',
+                background:'rgba(15,23,42,0.95)',
+                backdropFilter:'blur(10px)',
+                display:'flex',
+                alignItems:'center',
+                justifyContent:'space-between',
+                gap:8,
+                flexWrap:'nowrap',
+              }}>
+                <div style={{
+                  display:'flex',
+                  alignItems:'center',
+                  gap:12,
+                  fontSize:11,
+                  color:'#64748B',
+                  flex:1,
+                  overflow:'hidden',
+                }}>
+                  <span title="Hotels">
+                    🏨 {SYM[activeCur]}{conv(totalCost.hotels,activeCur).toLocaleString()}
+                  </span>
+                  <span style={{ color:'#334155' }}>·</span>
+                  <span title="Food">
+                    🍜 {SYM[activeCur]}{conv(totalCost.food,activeCur).toLocaleString()}
+                  </span>
+                  <span style={{ color:'#334155' }}>·</span>
+                  <span title="Activities">
+                    🎯 {totalCost.activities === 0
+                      ? 'Free'
+                      : `${SYM[activeCur]}${conv(totalCost.activities,activeCur).toLocaleString()}`
+                    }
+                  </span>
+                  <span style={{ color:'#334155' }}>·</span>
+                  <span title="Transport">
+                    🚗 {SYM[activeCur]}{conv(totalCost.transport,activeCur).toLocaleString()}
+                  </span>
                 </div>
-                <div style={{ display:'flex', gap:8, marginBottom:10 }}>
-                  {[['🏨','Hotels',totalCost.hotels],['🍜','Food',totalCost.food],['🎯','Activities',totalCost.activities],['🚗','Transport',totalCost.transport]].map(([e,l,v])=>(
-                    <div key={l} style={{ flex:1, textAlign:'center' }}>
-                      <div style={{ fontSize:10, color:'#64748B', marginBottom:2 }}>{e} {l}</div>
-                      <div style={{ fontSize:13, fontWeight:500 }}>{SYM[activeCur]}{conv(v,activeCur).toLocaleString()}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', borderTop:'1px solid #334155', paddingTop:10 }}>
-                  <span style={{ color:'#64748B', fontSize:13 }}>Total per person</span>
-                  <span style={{ fontWeight:500, fontSize:16 }}>{SYM[activeCur]}{conv(grandTotal,activeCur).toLocaleString()}</span>
+
+                <div style={{
+                  display:'flex',
+                  alignItems:'center',
+                  gap:8,
+                  flexShrink:0,
+                }}>
+                  <span style={{ fontSize:11, color:'#64748B' }}>Total</span>
+                  <span style={{
+                    fontSize:15,
+                    fontWeight:600,
+                    color:'#F1F5F9',
+                  }}>
+                    {SYM[activeCur]}{conv(grandTotal,activeCur).toLocaleString()}
+                  </span>
+                  <button
+                    onClick={() => setCostExpanded(p => !p)}
+                    style={{
+                      background:'none',
+                      border:'1px solid #334155',
+                      color:'#64748B',
+                      borderRadius:6,
+                      padding:'2px 8px',
+                      cursor:'pointer',
+                      fontSize:11,
+                      fontFamily:'inherit',
+                      transition:'all 0.2s',
+                    }}
+                    title="View full breakdown"
+                  >
+                    {costExpanded ? '▲' : '▼'}
+                  </button>
                 </div>
               </div>
+
+              {/* EXPANDABLE FULL BREAKDOWN — hidden by default */}
+              {costExpanded && (
+                <div style={{
+                  borderTop:'1px solid #334155',
+                  padding:'12px 20px',
+                  background:'#1E293B',
+                  animation:'fadeUp 0.2s ease',
+                }}>
+                  {[
+                    {
+                      e:'🏨', label:'Hotels',
+                      val: totalCost.hotels,
+                      detail: `${SYM[activeCur]}${conv(totalCost.hotelPerNight || 4,activeCur)}/night`,
+                      color:'#6366F1'
+                    },
+                    {
+                      e:'🍜', label:'Food',
+                      val: totalCost.food,
+                      detail: `${SYM[activeCur]}${conv(totalCost.foodPerDay || 2,activeCur)}/day · 3 meals`,
+                      color:'#F59E0B'
+                    },
+                    {
+                      e:'🎯', label:'Activities',
+                      val: totalCost.activities,
+                      detail: totalCost.activities === 0
+                        ? `${totalCost.freeStopsCount || 0} free stops · no entry fees`
+                        : `${totalCost.paidStopsCount || 0} paid · ${totalCost.freeStopsCount || 0} free`,
+                      color:'#10B981'
+                    },
+                    {
+                      e:'🚗', label:'Transport',
+                      val: totalCost.transport,
+                      detail: `${totalCost.totalKm || 0}km · ${totalCost.transportMode || 'Bus/Metro'}`,
+                      color:'#0EA5E9'
+                    },
+                  ].map(row => (
+                    <div key={row.label} style={{
+                      display:'flex', alignItems:'center',
+                      justifyContent:'space-between',
+                      padding:'6px 0',
+                      borderBottom:'1px solid #0F172A',
+                    }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <span style={{ fontSize:15 }}>{row.e}</span>
+                        <div>
+                          <div style={{ fontSize:13, fontWeight:500 }}>
+                            {row.label}
+                          </div>
+                          <div style={{ fontSize:10, color:'#475569' }}>
+                            {row.detail}
+                          </div>
+                        </div>
+                      </div>
+                      <span style={{ fontSize:13, fontWeight:500, color:row.color }}>
+                        {row.val === 0
+                          ? <span style={{ color:'#10B981' }}>FREE</span>
+                          : `${SYM[activeCur]}${conv(row.val,activeCur).toLocaleString()}`
+                        }
+                      </span>
+                    </div>
+                  ))}
+
+                  <div style={{
+                    marginTop:10, padding:'6px 10px',
+                    background:'rgba(16,185,129,0.08)',
+                    border:'1px solid rgba(16,185,129,0.2)',
+                    borderRadius:8, fontSize:11,
+                    color:'#10B981', textAlign:'center'
+                  }}>
+                    ✓ {Math.round((1 - (grandTotal / (totalCost.dailyUSD * totalCost.days))) * 100)}% within your {SYM[activeCur]}
+                    {conv(totalCost.dailyUSD * totalCost.days, activeCur).toLocaleString()} budget
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* ── RIGHT MAP PANEL ── */}
-            <div className="map-panel" style={{ position:'relative', height:'calc(100vh - 56px)' }}>
-              <div ref={mapEl} style={{ width:'100%', height:'100%' }}/>
+            <div className="map-panel" style={{ position:'relative', height:'calc(100vh - 56px)', overflow:'hidden' }}>
+              <div
+                ref={el => {
+                  mapEl.current = el;
+                  if (el && !mapMounted) setMapMounted(true);
+                }}
+                onClick={() => setDropdownOpen(false)}
+                style={{ width:'100%', height:'100%' }}
+              />
 
               {/* Map controls overlay */}
-              <div style={{ position:'absolute', top:12, left:12, zIndex:10, display:'flex', gap:6 }}>
-                <div className="map-control" style={{ display:'flex', gap:4 }}>
+              <div style={{
+                position:'absolute',
+                top:12,
+                left:12,
+                zIndex:1000,
+                display:'flex',
+                gap:4,
+                background:'#1E293B',
+                border:'1px solid #334155',
+                borderRadius:10,
+                padding:'5px 6px',
+                boxShadow:'0 4px 16px rgba(0,0,0,0.5)'
+              }}>
                   {[['🌙','dark'],['🗺️','street'],['🛰️','satellite']].map(([e,l])=>(
-                    <button key={l} onClick={()=>setMapLayer(l)} style={{ background:mapLayer===l?'rgba(99,102,241,0.3)':'transparent', border:'none', color:mapLayer===l?'#A5B4FC':'#64748B', padding:'6px 10px', borderRadius:8, cursor:'pointer', fontSize:12, fontFamily:'inherit', transition:'all 0.2s' }}>
+                    <button key={l} onClick={()=>setMapLayer(l)} style={{
+                      background: mapLayer === l ? '#6366F1' : 'transparent',
+                      border:'none',
+                      color: mapLayer === l ? 'white' : '#94A3B8',
+                      padding:'6px 12px',
+                      borderRadius:8,
+                      cursor:'pointer',
+                      fontSize:12,
+                      fontFamily:'inherit',
+                      fontWeight: mapLayer === l ? 500 : 400,
+                      transition:'all 0.2s',
+                      whiteSpace:'nowrap'
+                    }}>
                       {e}
                     </button>
                   ))}
-                </div>
               </div>
 
               {/* Day selector on map */}
-              <div style={{ position:'absolute', top:12, left:'50%', transform:'translateX(-50%)', zIndex:10 }}>
-                <div className="map-control" style={{ display:'flex', gap:4 }}>
+              <div style={{
+                position:'absolute',
+                top:12,
+                left:'50%',
+                transform:'translateX(-50%)',
+                zIndex:1000,
+                display:'flex',
+                gap:4,
+                background:'#1E293B',
+                border:'1px solid #334155',
+                borderRadius:10,
+                padding:'5px 6px',
+                boxShadow:'0 4px 16px rgba(0,0,0,0.5)'
+              }}>
                   {itin.days?.map(d=>(
-                    <button key={d.day} onClick={()=>switchDay(d.day)} style={{ background:activeDay===d.day?DAY_COLORS[(d.day-1)%DAY_COLORS.length]:'transparent', border:'none', color:activeDay===d.day?'white':'#94A3B8', padding:'6px 12px', borderRadius:8, cursor:'pointer', fontSize:12, fontFamily:'inherit', fontWeight:activeDay===d.day?600:400, transition:'all 0.2s' }}>
+                    <button key={d.day} onClick={()=>switchDay(d.day)} style={{
+                      background: activeDay === d.day ? DAY_COLORS[(d.day-1) % DAY_COLORS.length] : 'transparent',
+                      border:'none',
+                      color: activeDay === d.day ? 'white' : '#94A3B8',
+                      padding:'6px 12px',
+                      borderRadius:8,
+                      cursor:'pointer',
+                      fontSize:12,
+                      fontFamily:'inherit',
+                      fontWeight: activeDay === d.day ? 600 : 400,
+                      transition:'all 0.2s',
+                      minWidth:36,
+                      textAlign:'center'
+                    }}>
                       D{d.day}
                     </button>
                   ))}
-                </div>
               </div>
 
               {/* Weather overlay */}
               {weather?.current_weather && (
-                <div style={{ position:'absolute', top:12, right:12, zIndex:10 }}>
-                  <div className="map-control" style={{ fontSize:12, color:'#94A3B8', display:'flex', alignItems:'center', gap:6 }}>
-                    <span>{wxFor(weather.current_weather.weathercode)?.e}</span>
-                    <span>{Math.round(weather.current_weather.temperature)}°C</span>
-                    <span style={{ color:'#334155' }}>•</span>
-                    <span>💨 {Math.round(weather.current_weather.windspeed)} km/h</span>
-                  </div>
+                <div style={{
+                  position:'absolute',
+                  top:12,
+                  right:52,
+                  zIndex:1000,
+                  background:'#1E293B',
+                  border:'1px solid #334155',
+                  borderRadius:20,
+                  padding:'6px 12px',
+                  fontSize:12,
+                  color:'#94A3B8',
+                  boxShadow:'0 4px 16px rgba(0,0,0,0.5)',
+                  display:'flex',
+                  alignItems:'center',
+                  gap:6,
+                  whiteSpace:'nowrap'
+                }}>
+                  <span>{wxFor(weather.current_weather.weathercode)?.e}</span>
+                  <span>{Math.round(weather.current_weather.temperature)}°C</span>
+                  <span style={{ color:'#334155' }}>•</span>
+                  <span>💨 {Math.round(weather.current_weather.windspeed)} km/h</span>
                 </div>
               )}
 
               {/* Day summary pill */}
-              <div style={{ position:'absolute', bottom:20, left:'50%', transform:'translateX(-50%)', zIndex:10 }}>
-                <div className="map-control" style={{ fontSize:12, color:'#94A3B8', padding:'8px 14px', whiteSpace:'nowrap', display:'flex', gap:8 }}>
-                  <span style={{ color:DAY_COLORS[(activeDay-1)%DAY_COLORS.length] }}>●</span>
-                  <span>Day {activeDay}</span>
-                  <span style={{ color:'#334155' }}>•</span>
-                  <span>{rerankedStops.length} stops</span>
-                  <span style={{ color:'#334155' }}>•</span>
-                  <span>~{Math.round(rerankedStops.reduce((a,s)=>a+s._dur,0)/60*10)/10}h</span>
-                </div>
+              <div style={{
+                position:'absolute',
+                bottom:24,
+                left:'50%',
+                transform:'translateX(-50%)',
+                zIndex:1000,
+                background:'#1E293B',
+                border:'1px solid #334155',
+                borderRadius:20,
+                padding:'8px 16px',
+                fontSize:12,
+                color:'#94A3B8',
+                boxShadow:'0 4px 16px rgba(0,0,0,0.5)',
+                display:'flex',
+                gap:8,
+                alignItems:'center',
+                whiteSpace:'nowrap'
+              }}>
+                <span style={{ color:DAY_COLORS[(activeDay-1)%DAY_COLORS.length] }}>●</span>
+                <span>Day {activeDay}</span>
+                <span style={{ color:'#334155' }}>•</span>
+                <span>{rerankedStops.length} stops</span>
+                <span style={{ color:'#334155' }}>•</span>
+                <span>~{Math.round(rerankedStops.reduce((a,s)=>a+s._dur,0)/60*10)/10}h</span>
+              </div>
+
+              <div style={{
+                position:'absolute',
+                bottom:24,
+                left:12,
+                zIndex:1000,
+                background:'#1E293B',
+                border:'1px solid #334155',
+                borderRadius:8,
+                padding:'6px 10px',
+                fontSize:10,
+                color:'#475569',
+                boxShadow:'0 2px 8px rgba(0,0,0,0.4)'
+              }}>
+                ← → Arrow keys • Esc
               </div>
             </div>
           </div>
@@ -2319,16 +3306,51 @@ export default function App() {
                 {initials(user?.name)}
               </div>
               <div style={{ flex:1 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  {profileNameEdit ? (
-                    <input value={profileName} onChange={(e)=>setProfileName(e.target.value)} style={{ maxWidth:280 }} />
-                  ) : (
-                    <h2 style={{ fontSize:22, fontWeight:500 }}>{user?.name || 'Traveler'}</h2>
-                  )}
-                  <button onClick={() => profileNameEdit ? saveProfileName() : setProfileNameEdit(true)} style={{ border:'1px solid var(--border)', background:'transparent', color:'var(--text-secondary)', borderRadius:8, padding:'5px 10px', cursor:'pointer' }}>
-                    {profileNameEdit ? 'Save' : '✏️'}
-                  </button>
-                </div>
+                {editingName ? (
+                  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                    <input
+                      value={nameInput}
+                      onChange={e => setNameInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && saveName()}
+                      style={{
+                        background: '#273549',
+                        border: '1px solid #6366F1',
+                        borderRadius: 8,
+                        padding: '8px 12px',
+                        color: '#F1F5F9',
+                        fontSize: 16,
+                        fontWeight: 500,
+                        width: 200
+                      }}
+                      autoFocus
+                    />
+                    <RippleBtn
+                      onClick={saveName}
+                      className="btn-primary"
+                      style={{ padding: '8px 16px', fontSize: 13 }}
+                    >
+                      {savingName ? '...' : 'Save'}
+                    </RippleBtn>
+                    <button
+                      onClick={() => { setEditingName(false); setNameInput(user?.name || ''); }}
+                      className="btn-secondary"
+                      style={{ padding: '8px 12px', fontSize: 13 }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                    <h2 style={{ fontWeight:500, fontSize:20 }}>{user?.name}</h2>
+                    <button
+                      onClick={() => { setEditingName(true); setNameInput(user?.name || ''); }}
+                      style={{ background:'none', border:'none', cursor:'pointer', fontSize:16, padding:4 }}
+                      title="Edit name"
+                    >
+                      ✏️
+                    </button>
+                  </div>
+                )}
                 <p style={{ color:'var(--text-secondary)', fontSize:14 }}>{user?.email || 'user@email.com'}</p>
                 <p style={{ color:'var(--text-muted)', fontSize:12, marginTop:4 }}>Member since {formatDate(user?.created_at || Date.now())}</p>
               </div>
@@ -2360,7 +3382,7 @@ export default function App() {
           <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:16, marginBottom:16 }}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
               <h3 style={{ fontSize:16, fontWeight:500 }}>Recent Trips</h3>
-              <button className="btn-secondary" style={{ fontSize:12, padding:'6px 10px' }} onClick={()=>navigateTo('saved')}>View All</button>
+              <button className="btn-secondary" style={{ fontSize:12, padding:'6px 10px' }} onClick={openSavedTrips}>View All</button>
             </div>
             <div style={{ display:'flex', gap:10, overflowX:'auto' }}>
               {recentTrips.length ? recentTrips.map((trip) => (
@@ -2382,7 +3404,15 @@ export default function App() {
             <div style={{ display:'grid', gap:10 }}>
               <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
                 <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Default origin city</span>
-                <input value={prefs.defaultOrigin} onChange={(e)=>setPrefs(p=>({ ...p, defaultOrigin:e.target.value }))} placeholder="Enter city" />
+                <input
+                  value={prefs.defaultOrigin}
+                  onChange={(e)=>{
+                    setPrefs(p=>({ ...p, defaultOrigin:e.target.value }));
+                    setPrefsDirty(true);
+                    setPrefsSaved(false);
+                  }}
+                  placeholder="Enter city"
+                />
               </div>
               <div style={{ display:'grid', gridTemplateColumns:'170px 1fr', alignItems:'center', gap:10 }}>
                 <span style={{ color:'var(--text-secondary)', fontSize:13 }}>Preferred vibes</span>
@@ -2390,7 +3420,15 @@ export default function App() {
                   {['Culture','Nature','Food','Nightlife','Wellness','Shopping'].map(v => {
                     const on = prefs.defaultVibes.includes(v);
                     return (
-                      <button key={v} className={`chip${on ? ' on' : ''}`} onClick={() => setPrefs(p => ({ ...p, defaultVibes: on ? p.defaultVibes.filter(x => x !== v) : [...p.defaultVibes, v] }))}>
+                      <button
+                        key={v}
+                        className={`chip${on ? ' on' : ''}`}
+                        onClick={() => {
+                          setPrefs(p => ({ ...p, defaultVibes: on ? p.defaultVibes.filter(x => x !== v) : [...p.defaultVibes, v] }));
+                          setPrefsDirty(true);
+                          setPrefsSaved(false);
+                        }}
+                      >
                         {v}
                       </button>
                     );
@@ -2402,7 +3440,11 @@ export default function App() {
                 <CustomDropdown
                   label="Group"
                   value={prefs.defaultGroup}
-                  onChange={(v)=>setPrefs(p=>({ ...p, defaultGroup:v }))}
+                  onChange={(v)=>{
+                    setPrefs(p=>({ ...p, defaultGroup:v }));
+                    setPrefsDirty(true);
+                    setPrefsSaved(false);
+                  }}
                   options={[{ value:'Solo', label:'Solo' }, { value:'Couple', label:'Couple' }, { value:'Family', label:'Family' }, { value:'Friends', label:'Friends' }]}
                 />
               </div>
@@ -2411,11 +3453,24 @@ export default function App() {
                 <CustomDropdown
                   label="Currency"
                   value={prefs.currency}
-                  onChange={(v)=>setPrefs(p=>({ ...p, currency:v }))}
+                  onChange={(v)=>{
+                    setPrefs(p=>({ ...p, currency:v }));
+                    setPrefsDirty(true);
+                    setPrefsSaved(false);
+                  }}
                   options={Object.keys(EXCHANGE).map(c => ({ value:c, label:c }))}
                 />
               </div>
             </div>
+            {prefsDirty && (
+              <RippleBtn
+                onClick={savePreferences}
+                className="btn-primary"
+                style={{ marginTop: 20, padding: '12px 28px' }}
+              >
+                {savingPrefs ? '⏳ Saving...' : prefsSaved ? '✓ Preferences Saved' : '💾 Save Preferences'}
+              </RippleBtn>
+            )}
           </div>
 
           <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:16, padding:16 }}>
@@ -2452,7 +3507,7 @@ export default function App() {
                 ['☀️ Light', 'light'],
                 ['💻 System', 'system']
               ].map(([label, value]) => (
-                <button key={value} className={`chip${prefs.theme===value ? ' on' : ''}`} onClick={()=>setPrefs(p=>({ ...p, theme:value }))}>{label}</button>
+                <button key={value} className={`chip${prefs.theme===value ? ' on' : ''}`} onClick={()=>updateSetting('theme', value)}>{label}</button>
               ))}
             </div>
           </div>
@@ -2460,10 +3515,10 @@ export default function App() {
           <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border)', borderRadius:14, padding:14, marginBottom:12 }}>
             <div style={{ fontWeight:500, marginBottom:10 }}>Display Preferences</div>
             <div style={{ display:'grid', gap:10 }}>
-              <CustomDropdown label="Default currency" value={prefs.currency} onChange={(v)=>setPrefs(p=>({ ...p, currency:v }))} options={['USD','INR','EUR','AED','GBP','SGD','JPY','THB'].map(c=>({ value:c, label:c }))} />
-              <CustomDropdown label="Default pace" value={prefs.pace} onChange={(v)=>setPrefs(p=>({ ...p, pace:v }))} options={[{ value:'relaxed', label:'Relaxed' }, { value:'balanced', label:'Balanced' }, { value:'fastpaced', label:'Fast-paced' }]} />
-              <CustomDropdown label="Distance unit" value={prefs.distanceUnit} onChange={(v)=>setPrefs(p=>({ ...p, distanceUnit:v }))} options={[{ value:'km', label:'km' }, { value:'miles', label:'miles' }]} />
-              <CustomDropdown label="Temperature unit" value={prefs.tempUnit} onChange={(v)=>setPrefs(p=>({ ...p, tempUnit:v }))} options={[{ value:'C', label:'°C' }, { value:'F', label:'°F' }]} />
+              <CustomDropdown label="Default currency" value={prefs.currency} onChange={(v)=>updateSetting('currency', v)} options={['USD','INR','EUR','AED','GBP','SGD','JPY','THB'].map(c=>({ value:c, label:c }))} />
+              <CustomDropdown label="Default pace" value={prefs.pace} onChange={(v)=>updateSetting('pace', v)} options={[{ value:'relaxed', label:'Relaxed' }, { value:'balanced', label:'Balanced' }, { value:'fastpaced', label:'Fast-paced' }]} />
+              <CustomDropdown label="Distance unit" value={prefs.distanceUnit} onChange={(v)=>updateSetting('distanceUnit', v)} options={[{ value:'km', label:'km' }, { value:'miles', label:'miles' }]} />
+              <CustomDropdown label="Temperature unit" value={prefs.tempUnit} onChange={(v)=>updateSetting('tempUnit', v)} options={[{ value:'C', label:'°C' }, { value:'F', label:'°F' }]} />
             </div>
           </div>
 
@@ -2472,7 +3527,14 @@ export default function App() {
             {[['Trip reminders', 'reminders'], ['Weather alerts', 'weather'], ['New features', 'features']].map(([label, key]) => (
               <div key={key} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 0' }}>
                 <span style={{ color:'var(--text-secondary)' }}>{label}</span>
-                <ToggleSwitch enabled={prefs.notifications[key]} onToggle={() => setPrefs(p => ({ ...p, notifications:{ ...p.notifications, [key]:!p.notifications[key] } }))} />
+                <ToggleSwitch
+                  enabled={prefs.notifications[key]}
+                  onToggle={() => {
+                    setPrefs(p => ({ ...p, notifications:{ ...p.notifications, [key]:!p.notifications[key] } }));
+                    setSettingsDirty(true);
+                    setSettingsSaved(false);
+                  }}
+                />
               </div>
             ))}
           </div>
@@ -2481,9 +3543,116 @@ export default function App() {
             <div style={{ fontWeight:500, marginBottom:10 }}>Data & Privacy</div>
             <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
               <button className="btn-secondary" onClick={exportMyData}>Export my data</button>
-              <button className="btn-secondary" onClick={()=>setDeleteModal('clearHistory')}>Clear trip history</button>
+              {!clearHistoryConfirm ? (
+                <button
+                  onClick={() => setClearHistoryConfirm(true)}
+                  style={{
+                    padding: '10px 16px',
+                    background: 'transparent',
+                    border: '1px solid #334155',
+                    color: '#94A3B8', borderRadius: 10,
+                    cursor: 'pointer', fontSize: 13,
+                    fontFamily: 'inherit', transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.borderColor = '#F87171';
+                    e.currentTarget.style.color = '#F87171';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.borderColor = '#334155';
+                    e.currentTarget.style.color = '#94A3B8';
+                  }}
+                >
+                  🗑️ Clear trip history
+                </button>
+              ) : (
+                <div style={{
+                  background: 'rgba(239,68,68,0.08)',
+                  border: '1px solid rgba(239,68,68,0.25)',
+                  borderRadius: 12, padding: '14px 16px',
+                  marginTop: 8, width:'100%'
+                }}>
+                  <p style={{ fontSize: 13, fontWeight: 500, color: '#FCA5A5', marginBottom: 4 }}>
+                    Clear all {savedTrips.length} saved trips?
+                  </p>
+                  <p style={{ fontSize: 12, color: '#64748B', marginBottom: 14 }}>
+                    This cannot be undone. All your trip data will be deleted.
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={clearAllTrips}
+                      disabled={clearingHistory}
+                      style={{
+                        flex: 1, padding: '9px 0',
+                        background: '#EF4444', border: 'none',
+                        color: 'white', borderRadius: 8,
+                        cursor: clearingHistory ? 'not-allowed' : 'pointer',
+                        fontSize: 13, fontFamily: 'inherit',
+                        fontWeight: 500,
+                        opacity: clearingHistory ? 0.6 : 1
+                      }}
+                    >
+                      {clearingHistory ? '⏳ Clearing...' : '🗑️ Yes, clear all'}
+                    </button>
+                    <button
+                      onClick={() => setClearHistoryConfirm(false)}
+                      style={{
+                        flex: 1, padding: '9px 0',
+                        background: 'transparent',
+                        border: '1px solid #334155',
+                        color: '#94A3B8', borderRadius: 8,
+                        cursor: 'pointer', fontSize: 13,
+                        fontFamily: 'inherit'
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
               <button className="btn-secondary" style={{ color:'#F87171', borderColor:'rgba(248,113,113,0.4)' }} onClick={()=>setDeleteModal('deleteAccount')}>Delete account</button>
             </div>
+          </div>
+
+          <div style={{
+            position: 'sticky',
+            bottom: 0,
+            background: 'rgba(15,23,42,0.95)',
+            backdropFilter: 'blur(10px)',
+            borderTop: '1px solid #1E293B',
+            padding: '16px 20px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginTop: 24
+          }}>
+            {settingsDirty && !settingsSaved && (
+              <span style={{ fontSize:13, color:'#F59E0B' }}>
+                ⚠️ You have unsaved changes
+              </span>
+            )}
+            {settingsSaved && (
+              <span style={{ fontSize:13, color:'#10B981' }}>
+                ✓ All settings saved
+              </span>
+            )}
+            {!settingsDirty && !settingsSaved && (
+              <span style={{ fontSize:13, color:'#64748B' }}>
+                Settings auto-save to your device
+              </span>
+            )}
+            <RippleBtn
+              onClick={saveSettings}
+              className="btn-primary"
+              disabled={!settingsDirty}
+              style={{
+                opacity: settingsDirty ? 1 : 0.5,
+                cursor: settingsDirty ? 'pointer' : 'default',
+                padding: '10px 24px'
+              }}
+            >
+              {settingsSaved ? '✓ Saved' : '💾 Save Settings'}
+            </RippleBtn>
           </div>
         </div>
       )}
@@ -2508,28 +3677,176 @@ export default function App() {
               ))}
             </div>
           ) : savedTrips.length===0 ? (
-            <div style={{ textAlign:'center', padding:60, color:'#64748B' }}>
-              <svg width="120" height="80" viewBox="0 0 120 80" style={{ marginBottom:10 }}>
-                <path d="M10 40 L110 40" stroke="#334155" strokeWidth="1.5" strokeDasharray="4 4"/>
-                <text x="55" y="44" fontSize="24" textAnchor="middle" style={{ animation:'float 3s ease-in-out infinite' }}>✈️</text>
-              </svg>
-              <p style={{ fontSize:16 }}>No trips yet - your adventures start here</p>
-              <p style={{ fontSize:13, marginTop:8 }}>Create your first trip to see it here</p>
-              <RippleBtn className="btn-primary" onClick={()=>startNew(0,true)} style={{ marginTop:20 }}>Plan a Trip →</RippleBtn>
+            <div style={{ textAlign: 'center', padding: '80px 20px', color: '#64748B' }}>
+              <div style={{ fontSize: 48, marginBottom: 16, animation: 'float 3s ease-in-out infinite' }}>🗺️</div>
+              <p style={{ fontSize: 16, marginBottom: 8 }}>No trips yet</p>
+              <p style={{ fontSize: 13, marginBottom: 24 }}>Your adventures start here</p>
+              <RippleBtn className="btn-primary" onClick={() => startNew(0, true)}>Plan a Trip →</RippleBtn>
             </div>
           ) : (
             <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(300px,1fr))', gap:16 }}>
               {savedTrips.map(trip=>(
-                <div key={trip.id} style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:16, padding:20, cursor:'pointer', transition:'all 0.2s' }} onClick={()=>{ setItin({ ...trip, days:(trip.days||[]).map(day=>({ ...day, stops:nearestNeighborSort((day.stops||[]).slice(0,4)) })) }); navigateTo('itinerary'); }}>
-                  <h3 style={{ fontWeight:500, marginBottom:6 }}>{trip.origin} → {trip.destination}</h3>
-                  <p style={{ color:'#64748B', fontSize:13, marginBottom:12 }}>{trip.duration_days} days • {(trip.vibes||[]).join(', ')||'Mixed'}</p>
-                  <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-                    {(trip.vibes||[]).map(v=><span key={v} style={{ background:'rgba(99,102,241,0.1)', color:'#A5B4FC', fontSize:11, padding:'3px 8px', borderRadius:20 }}>{CAT_EMOJI[v]||'🎯'} {v}</span>)}
-                  </div>
+                <div key={trip.id} style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:16, padding:20, transition:'all 0.2s', position:'relative' }}>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      setDeleteConfirmId(trip.id);
+                    }}
+                    style={{
+                      position: 'absolute', top: 12, right: 12,
+                      background: 'rgba(239,68,68,0.1)',
+                      border: '1px solid rgba(239,68,68,0.2)',
+                      color: '#F87171',
+                      borderRadius: 8, width: 32, height: 32,
+                      cursor: 'pointer', fontSize: 14,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      transition: 'all 0.2s', fontFamily: 'inherit'
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.background = 'rgba(239,68,68,0.2)';
+                      e.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.background = 'rgba(239,68,68,0.1)';
+                      e.currentTarget.style.borderColor = 'rgba(239,68,68,0.2)';
+                    }}
+                    title="Delete trip"
+                  >
+                    🗑️
+                  </button>
+
+                  {deleteConfirmId === trip.id ? (
+                    <div style={{ padding:'8px 0' }}>
+                      <p style={{ fontSize:14, marginBottom:4, fontWeight:500 }}>Delete this trip?</p>
+                      <p style={{ fontSize:12, color:'#64748B', marginBottom:16 }}>
+                        {trip.origin} → {trip.destination} · {trip.duration_days} days
+                      </p>
+                      <div style={{ display:'flex', gap:8 }}>
+                        <button
+                          onClick={async e => {
+                            e.stopPropagation();
+                            await deleteTrip(trip.id);
+                            setDeleteConfirmId(null);
+                          }}
+                          disabled={deletingTripId === trip.id}
+                          style={{
+                            flex:1, padding:'9px 0',
+                            background:'#EF4444', border:'none',
+                            color:'white', borderRadius:8,
+                            cursor:'pointer', fontSize:13,
+                            fontFamily:'inherit', fontWeight:500,
+                            opacity: deletingTripId === trip.id ? 0.6 : 1
+                          }}
+                        >
+                          {deletingTripId === trip.id ? '⏳ Deleting...' : '🗑️ Yes, Delete'}
+                        </button>
+                        <button
+                          onClick={e => {
+                            e.stopPropagation();
+                            setDeleteConfirmId(null);
+                          }}
+                          style={{
+                            flex:1, padding:'9px 0',
+                            background:'transparent',
+                            border:'1px solid #334155',
+                            color:'#94A3B8', borderRadius:8,
+                            cursor:'pointer', fontSize:13,
+                            fontFamily:'inherit'
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div onClick={() => loadSavedTrip(trip)} style={{ cursor:'pointer' }}>
+                      <h3 style={{ fontWeight:500, marginBottom:6, paddingRight:40 }}>
+                        {trip.origin} → {trip.destination}
+                      </h3>
+                      <p style={{ color:'#64748B', fontSize:13, marginBottom:12 }}>
+                        {trip.duration_days} days
+                        {trip.budget_level && ` · ${trip.budget_level}`}
+                        {trip.created_at && ` · ${new Date(trip.created_at).toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' })}`}
+                      </p>
+                      <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:14 }}>
+                        {(trip.vibes||[]).map(v=>(
+                          <span key={v} style={{
+                            background:'rgba(99,102,241,0.1)',
+                            border:'1px solid rgba(99,102,241,0.2)',
+                            color:'#A5B4FC', fontSize:11,
+                            padding:'3px 8px', borderRadius:20
+                          }}>
+                            {CAT_EMOJI[v] || '🎯'} {v}
+                          </span>
+                        ))}
+                      </div>
+                      <button
+                        style={{
+                          width:'100%', padding:'10px 0',
+                          background:'rgba(99,102,241,0.1)',
+                          border:'1px solid rgba(99,102,241,0.2)',
+                          color:'#A5B4FC', borderRadius:10,
+                          cursor:'pointer', fontSize:13,
+                          fontFamily:'inherit', fontWeight:500,
+                          transition:'all 0.2s'
+                        }}
+                        onMouseEnter={e => {
+                          e.currentTarget.style.background = 'rgba(99,102,241,0.2)';
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.background = 'rgba(99,102,241,0.1)';
+                        }}
+                      >
+                        View Itinerary →
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {unsavedModal && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'grid', placeItems:'center', zIndex:600, backdropFilter:'blur(6px)' }}>
+          <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:32, maxWidth:380, width:'90%' }}>
+            <div style={{ fontSize:32, marginBottom:12 }}>💾</div>
+            <h2 style={{ fontWeight:500, marginBottom:8 }}>
+              Save before leaving?
+            </h2>
+            <p style={{ color:'#64748B', fontSize:14, marginBottom:24 }}>
+              Your {itin?.destination} trip hasn't been saved.
+              It will be lost if you start a new trip.
+            </p>
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              <RippleBtn
+                className="btn-primary"
+                onClick={async () => {
+                  await saveTrip();
+                  setUnsavedModal(false);
+                  startNew(0, true);
+                }}
+                style={{ width:'100%' }}
+              >
+                💾 Save Trip Then Start New
+              </RippleBtn>
+              <button
+                className="btn-secondary"
+                onClick={() => { setUnsavedModal(false); startNew(0, true); }}
+                style={{ width:'100%', color:'#F87171', borderColor:'rgba(248,113,113,0.3)' }}
+              >
+                Discard & Start New
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() => setUnsavedModal(false)}
+                style={{ width:'100%' }}
+              >
+                Keep Editing
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -2550,13 +3867,11 @@ export default function App() {
       {deleteModal && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'grid', placeItems:'center', zIndex:650, backdropFilter:'blur(6px)' }} onClick={()=>setDeleteModal('')}>
           <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:20, padding:28, maxWidth:400, width:'90%' }} onClick={e=>e.stopPropagation()}>
-            <h3 style={{ marginBottom:8 }}>{deleteModal==='clearHistory' ? 'Clear trip history?' : 'Delete account?'}</h3>
-            <p style={{ color:'#94A3B8', fontSize:13, marginBottom:16 }}>
-              {deleteModal==='clearHistory' ? 'This removes all saved trips from this browser.' : 'This will sign you out from this session.'}
-            </p>
+            <h3 style={{ marginBottom:8 }}>Delete account?</h3>
+            <p style={{ color:'#94A3B8', fontSize:13, marginBottom:16 }}>This will sign you out from this session.</p>
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn-secondary" style={{ flex:1 }} onClick={()=>setDeleteModal('')}>Cancel</button>
-              <button className="btn-primary" style={{ flex:1, background:'linear-gradient(135deg,#EF4444,#DC2626)' }} onClick={deleteModal==='clearHistory' ? clearTripHistory : logout}>Confirm</button>
+              <button className="btn-primary" style={{ flex:1, background:'linear-gradient(135deg,#EF4444,#DC2626)' }} onClick={logout}>Confirm</button>
             </div>
           </div>
         </div>
@@ -2703,13 +4018,3 @@ function rankItems(items, rankBy, type, userBudgetLevel, userComfortRadius) {
   });
 }
 
-function getRankReason(item, rankBy) {
-  const reasons = [];
-  if (item.recommended) reasons.push('recommended by our agents');
-  if (item._withinBudget) reasons.push('within your budget');
-  if (item._withinRadius) reasons.push('within comfort radius');
-  if (item._rating >= 4.5) reasons.push(`rated ${item._rating}★`);
-  if (rankBy === 'price_low') reasons.push('lowest price');
-  if (rankBy === 'distance') reasons.push('nearest stop');
-  return reasons.length ? `Ranked #1 · ${reasons.slice(0, 3).join(' · ')}` : 'Top pick';
-}
