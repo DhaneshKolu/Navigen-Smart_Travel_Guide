@@ -512,6 +512,7 @@ export default function App() {
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false);
+  const [authPromptModal, setAuthPromptModal] = useState(false);
 
   // ── Refs ──
   const mapRef = useRef(null);
@@ -1450,6 +1451,11 @@ export default function App() {
     ls.async = true;
     ls.onload = () => setMapReady(true);
     document.head.appendChild(ls);
+
+    fetch(`${API_BASE}/health`)
+      .then(r => r.json())
+      .then(d => console.log('Backend status:', d.status))
+      .catch(() => console.log('Backend waking up...'));
   }, [loadUserPreferences]);
 
   useEffect(() => {
@@ -1717,8 +1723,28 @@ export default function App() {
       setNameInput(sess.name || '');
       await loadUserPreferences(sess.token);
       await loadSavedTrips(sess);
-      showToast('✓ Logged in successfully');
-      navigateTo('dashboard');
+
+      const pending = sessionStorage.getItem('pendingTrip');
+      if (pending) {
+        try {
+          const savedChat = JSON.parse(pending);
+          sessionStorage.removeItem('pendingTrip');
+          setChatData(savedChat);
+          setReadyBuild(true);
+          setHistory([{
+            from: 'bot',
+            text: `Welcome back! Ready to plan your trip from ${savedChat.origin} to ${savedChat.destination}?`
+          }]);
+          navigateTo('chat');
+          showToast('✓ Signed in! Your trip details were saved.');
+        } catch {
+          navigateTo('dashboard');
+        }
+      } else {
+        navigateTo('dashboard');
+      }
+
+      showToast(`✓ Welcome, ${d.name}!`);
     } catch(e) {
       const msg = String(e?.message || 'Authentication failed');
       if (msg.toLowerCase().includes('failed to fetch')) {
@@ -1795,21 +1821,71 @@ export default function App() {
   // ── Build itinerary ──
   const buildIt = async () => {
     setError(null); setLoading(true); setLoadIdx(0); setLoadProg(0);
+
+    if (!user || !user.token || user.isGuest) {
+      setLoading(false);
+      setAuthPromptModal(true);
+      return;
+    }
+
     try {
       const res = await fetch(`${API_BASE}/api/plan`, {
         method:'POST',
-        headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${user?.token||''}` },
+        headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${user.token}` },
         body: JSON.stringify({
           origin:chatData.origin, destination:chatData.destination,
           origin_lat:chatData.originLat, origin_lng:chatData.originLng,
           dest_lat:chatData.destLat, dest_lng:chatData.destLng,
           days:chatData.days, comfort_radius:chatData.comfort_radius, vibes:chatData.vibes,
           group_type:chatData.group_type, budget_level:chatData.budget_level,
-          budget_usd_per_day: budgetRangeMap[chatData.budget_level] || null,
           special_requests:chatData.special_requests
         })
       });
-      if (!res.ok) { const e=new Error(`${res.status}`); e.status=res.status; throw e; }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const errDetail = typeof errData?.detail === 'string'
+          ? errData.detail
+          : Array.isArray(errData?.detail)
+            ? errData.detail.map(x => x?.msg || String(x)).join(', ')
+            : errData?.detail
+              ? String(errData.detail)
+              : '';
+
+        if (res.status === 401 || res.status === 403) {
+          setLoading(false);
+          localStorage.removeItem('travelUser');
+          sessionStorage.removeItem('travelGuest');
+          setUser(null);
+          setAuthPromptModal(true);
+          return;
+        }
+
+        if (res.status === 422) {
+          setLoading(false);
+          setError({
+            title: 'Invalid request',
+            msg: errDetail || 'Please check your destination and try again.',
+            action: null,
+            type: 'validation'
+          });
+          return;
+        }
+
+        if (res.status === 500) {
+          setLoading(false);
+          setError({
+            title: 'Server error',
+            msg: 'Our AI agents hit an issue. Please try again.',
+            action: buildIt,
+            type: 'server'
+          });
+          return;
+        }
+
+        throw new Error(`${res.status}: ${errDetail || 'Unknown error'}`);
+      }
+
       const data = await res.json();
       setLoadProg(100);
       setTimeout(() => setLoading(false), 300);
@@ -1832,22 +1908,39 @@ export default function App() {
       setItin(optimizedTrip);
       setTripSaved(false);
       setActiveDay(1);
-      setActiveCur(prefs.currency || (trip.local_currency in EXCHANGE ? trip.local_currency : 'USD'));
+      setActiveCur(trip.local_currency in EXCHANGE ? trip.local_currency : 'INR');
       setActivePace(prefs.pace || 'balanced');
       setCompletedStops({});
-      navigateTo('itinerary');
+      setPage('itinerary');
       const lat = trip.center_lat || chatData.destLat;
       const lng = trip.center_lng || chatData.destLng;
       if (lat && lng) fetchWeather(lat, lng).then(setWeather).catch(()=>{});
     } catch(e) {
       setLoading(false);
-      const s = e?.status;
-      const msg = s===401 ? 'Session expired — please log in again.'
-        : s===422 ? 'Couldn\'t understand the destination — be more specific.'
-        : s===500 ? 'Travel agents are busy — try again in a moment.'
-        : 'Something went wrong. Please try again.';
-      showToast('⚠️ API error — retrying...', 'error');
-      setError({ title:"Couldn't build your itinerary", msg, action: s===401 ? ()=>navigateTo('auth') : buildIt });
+
+      const msg = String(e?.message || '');
+      const isNetwork = !e?.status
+        || msg.toLowerCase().includes('fetch')
+        || msg.toLowerCase().includes('network')
+        || msg.toLowerCase().includes('failed to fetch');
+
+      if (isNetwork) {
+        setError({
+          title: 'Cannot reach server',
+          msg: 'The server may be starting up. Please wait 30 seconds and try again.',
+          action: buildIt,
+          type: 'network',
+          showWakeUp: true,
+        });
+        return;
+      }
+
+      setError({
+        title: "Couldn't build your itinerary",
+        msg: e?.message || 'Something went wrong.',
+        action: buildIt,
+        type: 'unknown'
+      });
     }
   };
 
@@ -2449,10 +2542,81 @@ export default function App() {
           </div>
 
           {error && (
-            <div style={{ background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:12, padding:16, marginTop:12 }}>
-              <p style={{ color:'#FCA5A5', fontWeight:500, marginBottom:6 }}>{error.title}</p>
-              <p style={{ color:'#94A3B8', fontSize:13, marginBottom:12 }}>{error.msg}</p>
-              <RippleBtn className="btn-primary" onClick={error.action}>Try Again</RippleBtn>
+            <div style={{
+              background: error.type === 'network'
+                ? 'rgba(245,158,11,0.08)'
+                : 'rgba(239,68,68,0.08)',
+              border: `1px solid ${error.type === 'network'
+                ? 'rgba(245,158,11,0.25)'
+                : 'rgba(239,68,68,0.25)'}`,
+              borderRadius: 14,
+              padding: 20,
+              marginTop: 16,
+            }}>
+              <div style={{ fontSize: 28, marginBottom: 10 }}>
+                {error.type === 'network' ? '🌐'
+                  : error.type === 'validation' ? '⚠️'
+                  : error.type === 'server' ? '🔧'
+                  : '❌'}
+              </div>
+
+              <p style={{
+                color: error.type === 'network' ? '#FCD34D' : '#FCA5A5',
+                fontWeight: 500,
+                marginBottom: 6,
+                fontSize: 15,
+              }}>
+                {error.title}
+              </p>
+
+              <p style={{
+                color: '#94A3B8',
+                fontSize: 13,
+                marginBottom: 16,
+                lineHeight: 1.6,
+              }}>
+                {error.msg}
+              </p>
+
+              {error.showWakeUp && (
+                <div style={{
+                  background: 'rgba(245,158,11,0.08)',
+                  border: '1px solid rgba(245,158,11,0.2)',
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                  fontSize: 12,
+                  color: '#FCD34D',
+                  marginBottom: 16,
+                  lineHeight: 1.6,
+                }}>
+                  💡 On Render free tier, the server sleeps after inactivity and takes around 30 seconds to wake up. Click "Try Again" after waiting a moment.
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                {error.action && (
+                  <RippleBtn
+                    className="btn-primary"
+                    onClick={error.action}
+                    style={{ flex: 1 }}
+                  >
+                    🔄 Try Again
+                  </RippleBtn>
+                )}
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    setError(null);
+                    setReadyBuild(false);
+                    setQIdx(0);
+                    setHistory([]);
+                    setPage('chat');
+                  }}
+                  style={{ flex: 1 }}
+                >
+                  Start Over
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -3872,6 +4036,130 @@ export default function App() {
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn-secondary" style={{ flex:1 }} onClick={()=>setDeleteModal('')}>Cancel</button>
               <button className="btn-primary" style={{ flex:1, background:'linear-gradient(135deg,#EF4444,#DC2626)' }} onClick={logout}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {authPromptModal && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.7)',
+          display: 'grid',
+          placeItems: 'center',
+          zIndex: 9000,
+          backdropFilter: 'blur(8px)',
+        }}
+          onClick={() => setAuthPromptModal(false)}
+        >
+          <div
+            style={{
+              background: '#1E293B',
+              border: '1px solid #334155',
+              borderRadius: 24,
+              padding: 36,
+              maxWidth: 400,
+              width: '90%',
+              textAlign: 'center',
+              animation: 'slideUp 0.3s ease',
+              boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 52, marginBottom: 16 }}>✈️</div>
+
+            <h2 style={{
+              fontWeight: 500,
+              fontSize: 22,
+              marginBottom: 8,
+              color: '#F1F5F9',
+            }}>
+              Sign in to plan your trip
+            </h2>
+
+            <p style={{
+              color: '#64748B',
+              fontSize: 14,
+              marginBottom: 28,
+              lineHeight: 1.6,
+            }}>
+              Create a free account to generate your personalized itinerary, save trips, and access them anytime.
+            </p>
+
+            <div style={{
+              background: 'rgba(99,102,241,0.06)',
+              border: '1px solid rgba(99,102,241,0.15)',
+              borderRadius: 12,
+              padding: '14px 16px',
+              marginBottom: 24,
+              textAlign: 'left',
+            }}>
+              {[
+                '🗺️ AI-powered itinerary generation',
+                '💾 Save and revisit your trips',
+                '🏨 Real hotel & restaurant suggestions',
+                '🌤️ Live weather for your destination',
+                '📍 Interactive map with navigation',
+              ].map(item => (
+                <div key={item} style={{
+                  fontSize: 13,
+                  color: '#94A3B8',
+                  padding: '4px 0',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  {item}
+                </div>
+              ))}
+            </div>
+
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+            }}>
+              <RippleBtn
+                className="btn-primary shimmer-btn"
+                onClick={() => {
+                  setAuthPromptModal(false);
+                  setAuthTab('register');
+                  sessionStorage.setItem('pendingTrip', JSON.stringify(chatData));
+                  setPage('auth');
+                }}
+                style={{ width: '100%', padding: '13px 0', fontSize: 15 }}
+              >
+                Create Free Account →
+              </RippleBtn>
+
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  setAuthPromptModal(false);
+                  setAuthTab('login');
+                  sessionStorage.setItem('pendingTrip', JSON.stringify(chatData));
+                  setPage('auth');
+                }}
+                style={{ width: '100%', padding: '12px 0' }}
+              >
+                Sign In to Existing Account
+              </button>
+
+              <button
+                onClick={() => setAuthPromptModal(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#475569',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  padding: '6px 0',
+                }}
+              >
+                Maybe later
+              </button>
             </div>
           </div>
         </div>
