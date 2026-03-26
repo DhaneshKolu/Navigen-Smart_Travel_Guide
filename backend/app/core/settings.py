@@ -19,11 +19,13 @@ class Settings(BaseSettings):
     GEOAPIFY_DEFAULT_RADIUS_METERS: int = 5000
     
     GOOGLE_PLACES_API_KEY: str = ""
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
     
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        extra="ignore"
     )
 
 
