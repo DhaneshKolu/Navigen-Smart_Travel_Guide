@@ -49,6 +49,20 @@ HOTEL_PRICE_LEVELS = {
     "Ultra": [3, 4],
 }
 
+FALLBACK_FOOD_PRICE_USD = {
+    "Budget": 2,
+    "Relaxed": 4,
+    "Luxury": 10,
+    "Ultra": 18,
+}
+
+FALLBACK_HOTEL_PRICE_USD = {
+    "Budget": 8,
+    "Relaxed": 15,
+    "Luxury": 32,
+    "Ultra": 85,
+}
+
 class PlacesService:
 
     def __init__(self, db: Session):
@@ -241,6 +255,21 @@ def _guess_amenities(place: dict[str, Any]) -> list[str]:
     return amenities[:4]
 
 
+def _looks_like_lodging(place: dict[str, Any]) -> bool:
+    name = str(place.get("name") or "").lower()
+    types = [str(t).lower() for t in (place.get("types") or [])]
+    type_blob = " ".join(types)
+    lodging_tokens = ["lodging", "hotel", "hostel", "guest_house", "guesthouse", "motel", "apartment", "inn", "resort", "homestay"]
+    food_tokens = ["restaurant", "cafe", "bakery", "bar", "food", "meal_takeaway"]
+
+    name_lodging = any(t in name for t in ["hotel", "hostel", "guest house", "guesthouse", "inn", "resort", "homestay", "lodge"])
+    has_lodging = any(t in type_blob for t in lodging_tokens) or name_lodging
+    has_food = any(t in type_blob for t in food_tokens) or any(t in name for t in ["cafe", "restaurant", "dhaba", "kitchen", "tiffin", "tiffens", "bakery", "mess"])
+    if has_food and not name_lodging:
+        return False
+    return has_lodging
+
+
 def _map_new_price_level(value: Any) -> int:
     if isinstance(value, int):
         return value
@@ -337,7 +366,7 @@ async def _search_places(
     new_places = await _google_places_text_search(client, query, "restaurant", lat, lng, 5000)
     if new_places:
         restaurants = []
-        for place in new_places[:4]:
+        for place in new_places[:12]:
             price = int(place.get("price_level", 1) or 1)
             if price_levels and price > max(price_levels):
                 continue
@@ -385,7 +414,7 @@ async def _search_places(
             return []
 
         restaurants = []
-        for place in data.get("results", [])[:4]:
+        for place in data.get("results", [])[:12]:
             price = int(place.get("price_level", 1) or 1)
             if price_levels and price > max(price_levels):
                 continue
@@ -494,17 +523,19 @@ async def _search_hotels(
     if new_places:
         cap_usd = {"Budget": 6, "Relaxed": 18, "Luxury": 35, "Ultra": 9999}
         hotels = []
-        for place in new_places[:4]:
+        for place in new_places[:16]:
+            if not _looks_like_lodging(place):
+                continue
             price = int(place.get("price_level", 1) or 1)
-            if price_levels and price > max(price_levels):
+            if price_levels and (price < min(price_levels) or price > max(price_levels)):
                 continue
             place_id = place.get("place_id")
             if not place_id:
                 continue
 
             maps_url = f"https://www.google.com/maps/place/?q=place_id:{place_id}"
-            price_usd = {0: 3, 1: 6, 2: 20, 3: 40, 4: 120}.get(price, 6)
-            price_inr = {0: 250, 1: 500, 2: 1500, 3: 3000, 4: 10000}.get(price, 500)
+            price_usd = {0: 8, 1: 12, 2: 18, 3: 32, 4: 85}.get(price, 12)
+            price_inr = {0: 650, 1: 1000, 2: 1500, 3: 2700, 4: 7100}.get(price, 1000)
             over = price_usd > cap_usd.get(budget_level, 6)
 
             hotels.append(
@@ -545,9 +576,11 @@ async def _search_hotels(
 
         cap_usd = {"Budget": 6, "Relaxed": 18, "Luxury": 35, "Ultra": 9999}
         hotels = []
-        for place in data.get("results", [])[:4]:
+        for place in data.get("results", [])[:16]:
+            if not _looks_like_lodging(place):
+                continue
             price = int(place.get("price_level", 1) or 1)
-            if price_levels and price > max(price_levels):
+            if price_levels and (price < min(price_levels) or price > max(price_levels)):
                 continue
 
             place_id = place.get("place_id")
@@ -561,8 +594,8 @@ async def _search_hotels(
                 if ref:
                     photo_url = f"{PLACES_PHOTO_URL}?maxwidth=400&photo_reference={ref}&key={GOOGLE_PLACES_KEY}"
 
-            price_usd = {0: 3, 1: 6, 2: 20, 3: 40, 4: 120}.get(price, 6)
-            price_inr = {0: 250, 1: 500, 2: 1500, 3: 3000, 4: 10000}.get(price, 500)
+            price_usd = {0: 8, 1: 12, 2: 18, 3: 32, 4: 85}.get(price, 12)
+            price_inr = {0: 650, 1: 1000, 2: 1500, 3: 2700, 4: 7100}.get(price, 1000)
             over = price_usd > cap_usd.get(budget_level, 6)
 
             hotels.append(
@@ -607,7 +640,7 @@ async def fetch_real_hotels(
 
         tasks = [
             _search_hotels(client, f"{kw} in {destination}", price_levels, budget_level, lat, lng)
-            for kw in keywords[:2]
+            for kw in keywords[:3]
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -625,8 +658,8 @@ async def fetch_real_hotels(
             seen.add(place_id)
             unique.append(h)
 
-        unique.sort(key=lambda x: (x.get("overBudget", False), -(x.get("rating") or 0)))
-        return unique[:4]
+        unique.sort(key=lambda x: (x.get("overBudget", False), -(x.get("rating") or 0), x.get("price_usd") or 0))
+        return unique[:10]
 
 
 async def fetch_real_restaurants_with_fallback(
@@ -643,14 +676,16 @@ async def fetch_real_restaurants_with_fallback(
     except Exception:
         logger.exception("Real restaurant fetch failed")
 
+    level = budget_level if budget_level in FALLBACK_FOOD_PRICE_USD else "Budget"
+    fallback_usd = FALLBACK_FOOD_PRICE_USD[level]
     query_dest = destination.replace(" ", "+")
     return [
         {
             "name": f"Local restaurants in {destination}",
             "restaurant": "Search on Google",
             "meal_type": "All meals",
-            "cost_usd": 2,
-            "cost_inr": 150,
+            "cost_usd": fallback_usd,
+            "cost_inr": int(round(fallback_usd * 83)),
             "rating": None,
             "verified": False,
             "emoji": "🍜",
@@ -676,23 +711,35 @@ async def fetch_real_hotels_with_fallback(
     except Exception:
         logger.exception("Real hotel fetch failed")
 
+    level = budget_level if budget_level in FALLBACK_HOTEL_PRICE_USD else "Budget"
+    fallback_usd = FALLBACK_HOTEL_PRICE_USD[level]
     query_dest = destination.replace(" ", "+")
-    return [
-        {
-            "name": f"Hotels in {destination}",
-            "address": destination,
-            "stars": 2,
-            "price_usd": 6,
-            "price_inr": 500,
-            "rating": None,
-            "user_ratings_total": 0,
-            "amenities": ["WiFi"],
-            "photo_url": None,
-            "maps_url": f"https://www.google.com/maps/search/hotels+in+{query_dest}",
-            "booking_url": f"https://www.google.com/travel/hotels/search?q=hotels+in+{query_dest}&currency=INR",
-            "verified": False,
-            "is_fallback": True,
-            "recommended": True,
-            "overBudget": False,
-        }
+    area_hints = [
+        f"city center {destination}",
+        f"railway station {destination}",
+        f"bus stand {destination}",
+        f"main market {destination}",
     ]
+    items = []
+    for idx, area in enumerate(area_hints):
+        area_query = area.replace(" ", "+")
+        items.append(
+            {
+                "name": f"Hotel options near {area.title()}",
+                "address": area.title(),
+                "stars": 2 if level in {"Budget", "Relaxed"} else 3,
+                "price_usd": fallback_usd,
+                "price_inr": int(round(fallback_usd * 83)),
+                "rating": None,
+                "user_ratings_total": 0,
+                "amenities": ["WiFi"],
+                "photo_url": None,
+                "maps_url": f"https://www.google.com/maps/search/hotels+near+{area_query}",
+                "booking_url": f"https://www.google.com/travel/hotels/search?q=hotels+near+{area_query}&currency=INR",
+                "verified": False,
+                "is_fallback": True,
+                "recommended": idx == 0,
+                "overBudget": False,
+            }
+        )
+    return items

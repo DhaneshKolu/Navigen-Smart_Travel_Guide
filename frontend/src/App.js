@@ -24,6 +24,7 @@ const WX_MAP = {
   80:{e:'⛈️',b:'Check before going',c:'#EF4444'}, 95:{e:'⛈️',b:'Storm warning',c:'#EF4444'},
 };
 const PACE = { relaxed:1.5, balanced:1.0, fastpaced:0.7 };
+const STOPS_PER_PACE = { relaxed:3, balanced:4, fastpaced:5 };
 const LOADING_MSGS = [
   'Talking to your AI travel agents…',
   'Scouting the best spots in {dest}…',
@@ -93,6 +94,38 @@ const RADIUS_KM = {
   regional: 50,
   flexible: Infinity,
 };
+
+function resolveComfortRadiusKm(comfortRadius, comfortRadiusKm) {
+  if (Number.isFinite(Number(comfortRadiusKm)) && Number(comfortRadiusKm) > 0) {
+    return Number(comfortRadiusKm);
+  }
+  const m = String(comfortRadius || '').toLowerCase().match(/^custom_(\d+)km$/);
+  if (m) return Number(m[1]);
+  return RADIUS_KM[comfortRadius] || Infinity;
+}
+const JUNK_KEYWORDS = [
+  'hotel', 'oyo', 'hostel', 'guesthouse', 'lodge',
+  'motel', 'resort', 'inn', 'suites',
+  'restaurant', 'dhaba', 'cafe', 'food court', 'canteen',
+  'school', 'college', 'university', 'institute',
+  'hospital', 'clinic', 'pharmacy',
+  'mall', 'supermarket', 'grocery',
+  'office', 'it park', 'tech park',
+  'bus stand', 'bus depot', 'petrol pump',
+  'apartment', 'colony', 'society', 'nagar',
+];
+const TOURIST_KEYWORDS = [
+  'fort', 'temple', 'mosque', 'church', 'gurudwara',
+  'museum', 'palace', 'monument', 'heritage', 'garden',
+  'park', 'lake', 'waterfall', 'beach', 'market',
+  'bazaar', 'masjid', 'mandir', 'charminar', 'qutb',
+  'tomb', 'mausoleum', 'gateway', 'tower', 'bridge',
+  'zoo', 'sanctuary', 'reserve', 'national',
+  'historical', 'ancient', 'ruins', 'ghats',
+  'viewpoint', 'plateau', 'valley', 'caves',
+  'dargah', 'shrine', 'cathedral', 'basilica',
+];
+const TOURIST_CATEGORIES = ['culture', 'nature', 'adventure', 'leisure', 'heritage', 'religious', 'historical', 'scenic'];
 const defaultPrefs = {
   theme: 'dark',
   currency: 'USD',
@@ -236,6 +269,21 @@ function computeStopTimes(stops, pace) {
   });
 }
 
+function isValidTouristStop(stop) {
+  const nameLower = (stop?.name || '').toLowerCase();
+  const descLower = (stop?.description || '').toLowerCase();
+  const catLower = (stop?.category || '').toLowerCase();
+
+  const isJunk = JUNK_KEYWORDS.some(k => nameLower.includes(k));
+  if (isJunk) return false;
+
+  const isTourist = TOURIST_KEYWORDS.some(k =>
+    nameLower.includes(k) || descLower.includes(k) || catLower.includes(k)
+  );
+  const isTouristCategory = TOURIST_CATEGORIES.some(c => catLower.includes(c));
+
+  return isTourist || isTouristCategory;
+}
 // ─── SUB-COMPONENTS ───────────────────────────────────────────────────────────
 
 function Ripple({ x, y, onDone }) {
@@ -447,7 +495,7 @@ export default function App() {
   const [chatData, setChatData] = useState({
     origin:'', destination:'', originLat:null, originLng:null,
     destLat:null, destLng:null, days:null,
-    comfort_radius:'', vibes:[], group_type:'', budget_level:'', budget_usd_per_day:null, special_requests:''
+    comfort_radius:'', comfort_radius_km:null, vibes:[], group_type:'', budget_level:'', budget_usd_per_day:null, special_requests:''
   });
   const [history, setHistory] = useState([]);
   const [qIdx, setQIdx] = useState(0);
@@ -461,6 +509,10 @@ export default function App() {
   const [readyBuild, setReadyBuild] = useState(false);
   const [customBudget, setCustomBudget] = useState('');
   const [showCustomBudget, setShowCustomBudget] = useState(false);
+  const [customDaysInput, setCustomDaysInput] = useState('');
+  const [showCustomDays, setShowCustomDays] = useState(false);
+  const [customRadius, setCustomRadius] = useState('');
+  const [showCustomRadius, setShowCustomRadius] = useState(false);
 
   // ── Itinerary ──
   const [itin, setItin] = useState(null);
@@ -538,10 +590,22 @@ export default function App() {
   const progPct = Math.round((qIdx / TOTAL_QUESTIONS) * 100);
 
   const radiusOptions = useMemo(() => [
-    { icon:'🚶', label:'Walkable', sub:'Under 5 km/day', value:'walkable' },
-    { icon:'🚗', label:'City Range', sub:'5–20 km/day', value:'city' },
-    { icon:'🛣️', label:'Regional', sub:'20–50 km/day', value:'regional' },
-    { icon:'✈️', label:'Flexible', sub:'No limit', value:'flexible' },
+    {
+      icon:'🚶', label:'Walkable', sub:'Under 5 km/day', value:'walkable',
+      desc:'All stops within walking distance of each other'
+    },
+    {
+      icon:'🚗', label:'City Range', sub:'5–20 km/day', value:'city',
+      desc:'Quick taxi or metro between stops'
+    },
+    {
+      icon:'🛣️', label:'Regional', sub:'20–50 km/day', value:'regional',
+      desc:'Day trips to nearby areas'
+    },
+    {
+      icon:'✈️', label:'Flexible', sub:'No limit', value:'flexible',
+      desc:'Best places regardless of distance'
+    },
   ], []);
 
   const budgetOptions = useMemo(() => [
@@ -632,9 +696,11 @@ export default function App() {
 
   const dayStops = useMemo(() => {
     if (!itin?.days) return [];
+    const maxStops = STOPS_PER_PACE[activePace] || 4;
     const day = itin.days.find(d => d.day === activeDay);
     if (!day?.stops) return [];
-    return computeStopTimes(day.stops.slice(0, 4), activePace);
+    const sliced = day.stops.slice(0, maxStops);
+    return computeStopTimes(sliced, activePace);
   }, [itin, activeDay, activePace]);
 
   const currentDayData = useMemo(() => itin?.days?.find(d=>d.day===activeDay), [itin, activeDay]);
@@ -649,12 +715,12 @@ export default function App() {
         : type === 'food'
           ? (FOOD_CAPS[budgetLevel] || 9999)
           : 9999;
-      const radiusCap = RADIUS_KM[comfortRadius] || Infinity;
+      const radiusCap = resolveComfortRadiusKm(comfortRadius, itin?.comfort_radius_km);
       const budgetOk = price === 0 || price <= cap;
       const radiusOk = dist === 0 || dist <= radiusCap;
       return budgetOk && radiusOk;
     });
-  }, [comfortFilter]);
+  }, [comfortFilter, itin?.comfort_radius_km]);
 
   const rankedFood = useMemo(() => {
     const food = currentDayData?.food || [];
@@ -743,16 +809,16 @@ export default function App() {
       || itin.transport_summary?.total_usd
       || (() => {
         const COST_PER_KM = {
-          Budget: 0.008,
-          Relaxed: 0.025,
-          Luxury: 0.07,
-          Ultra: 0.14,
+          Budget: 5 / 83.5,
+          Relaxed: 15 / 83.5,
+          Luxury: 25 / 83.5,
+          Ultra: 40 / 83.5,
         };
         const BASE = {
-          Budget: 0.30,
-          Relaxed: 0.60,
-          Luxury: 1.20,
-          Ultra: 3.00,
+          Budget: 20 / 83.5,
+          Relaxed: 40 / 83.5,
+          Luxury: 80 / 83.5,
+          Ultra: 150 / 83.5,
         };
         let km = 0;
         itin.days.forEach(day => {
@@ -764,21 +830,42 @@ export default function App() {
         return (km * (COST_PER_KM[bl] || 0.008)) + ((BASE[bl] || 0.30) * days);
       })();
 
-    const MEAL_COST_PER_DAY = {
-      Budget: 2.0,
-      Relaxed: 6.0,
-      Luxury: 12.0,
-      Ultra: 25.0,
-    };
-    const foodUSD = (MEAL_COST_PER_DAY[bl] || 2.0) * days;
+    const hotelUSD = itin.days.reduce((sum, day) => {
+      const hotels = day.hotels || [];
+      if (!hotels.length) return sum;
+      const preferred = hotels.find(h => h.recommended) || hotels[0];
+      const price = Number(preferred?.price_usd || 0);
+      return sum + (Number.isFinite(price) ? price : 0);
+    }, 0);
 
-    const HOTEL_PER_NIGHT = {
-      Budget: 4,
-      Relaxed: 12,
-      Luxury: 25,
-      Ultra: 60,
-    };
-    const hotelUSD = (HOTEL_PER_NIGHT[bl] || 4) * days;
+    const foodUSD = itin.days.reduce((sum, day) => {
+      const foods = day.food || [];
+      if (!foods.length) return sum;
+
+      const byMealType = new Map();
+      foods.forEach((meal) => {
+        const type = String(meal?.meal_type || 'Meal');
+        const cost = Number(meal?.cost_usd || 0);
+        if (!Number.isFinite(cost)) return;
+        if (!byMealType.has(type) || cost < byMealType.get(type)) {
+          byMealType.set(type, cost);
+        }
+      });
+
+      let dayFood = Array.from(byMealType.values()).reduce((a, b) => a + b, 0);
+
+      // If meal types are not provided well, assume 3 consumed meals from cheapest options.
+      if (dayFood === 0) {
+        const cheapest = foods
+          .map(m => Number(m?.cost_usd || 0))
+          .filter(v => Number.isFinite(v) && v >= 0)
+          .sort((a, b) => a - b)
+          .slice(0, 3);
+        dayFood = cheapest.reduce((a, b) => a + b, 0);
+      }
+
+      return sum + dayFood;
+    }, 0);
 
     const totalEstimatedUSD = hotelUSD + foodUSD + activitiesUSD + transportUSD;
 
@@ -791,8 +878,8 @@ export default function App() {
       dailyUSD: DAILY_BUDGET_USD,
       days,
       totalKm: itin.transport_summary?.total_km || 0,
-      hotelPerNight: HOTEL_PER_NIGHT[bl] || 4,
-      foodPerDay: MEAL_COST_PER_DAY[bl] || 2,
+      hotelPerNight: hotelUSD / Math.max(1, days),
+      foodPerDay: foodUSD / Math.max(1, days),
       transportPerDay: transportUSD / Math.max(1, days),
       activitiesTotal: activitiesUSD,
       paidStops,
@@ -891,6 +978,7 @@ export default function App() {
           group_type: itin.group_type || chatData.group_type,
           budget_level: itin.budget_level || chatData.budget_level,
           comfort_radius: itin.comfort_radius || chatData.comfort_radius,
+          comfort_radius_km: itin.comfort_radius_km || chatData.comfort_radius_km || null,
           itinerary: itin
         })
       });
@@ -1027,6 +1115,58 @@ export default function App() {
     }
   };
 
+  const submitCustomRadius = () => {
+    const km = parseInt(customRadius, 10);
+    if (!km || km < 1 || km > 500) {
+      showToast('Enter a value between 1 and 500 km', 'error');
+      return;
+    }
+    const customValue = `custom_${km}km`;
+    setChatData(p => ({
+      ...p,
+      comfort_radius: customValue,
+      comfort_radius_km: km,
+    }));
+    addMsg('user', `📏 Custom: ${km} km between stops`);
+    setShowCustomRadius(false);
+    setCustomRadius('');
+    advanceQ(4);
+  };
+
+  const submitCustomDays = () => {
+    const d = parseInt(customDaysInput, 10);
+    if (!d || d < 1 || d > 30) {
+      showToast('Please enter a number between 1 and 30', 'error');
+      return;
+    }
+    setChatData(p => ({ ...p, days: d }));
+    addMsg('user', `${d} ${d === 1 ? 'day' : 'days'}`);
+    setShowCustomDays(false);
+    setCustomDaysInput('');
+    advanceQ(3);
+  };
+
+  const editAnswer = (bubbleIndex) => {
+    const userBubbles = history.slice(0, bubbleIndex).filter(m => m.from === 'user');
+    const questionIndex = userBubbles.length;
+    const newHistory = history.slice(0, Math.max(0, bubbleIndex - 1));
+    setHistory(newHistory);
+    setQIdx(questionIndex);
+    setReadyBuild(false);
+    setTextInput('');
+    setSugg([]);
+    if (questionIndex === 2) {
+      setShowCustomDays(false);
+      setCustomDaysInput('');
+    }
+    if (questionIndex === 3) {
+      setShowCustomRadius(false);
+      setCustomRadius('');
+    }
+    setTimeout(() => {
+      addMsg('bot', QUESTIONS[questionIndex]);
+    }, 100);
+  };
   const openSavedTrips = useCallback(() => {
     loadSavedTrips();
     setPage('saved');
@@ -1837,8 +1977,10 @@ export default function App() {
           origin_lat:chatData.originLat, origin_lng:chatData.originLng,
           dest_lat:chatData.destLat, dest_lng:chatData.destLng,
           days:chatData.days, comfort_radius:chatData.comfort_radius, vibes:chatData.vibes,
+          comfort_radius_km: chatData.comfort_radius_km || null,
           group_type:chatData.group_type, budget_level:chatData.budget_level,
-          special_requests:chatData.special_requests
+          special_requests:chatData.special_requests,
+          pace: activePace,
         })
       });
 
@@ -1898,9 +2040,35 @@ export default function App() {
       trip.vibes = chatData.vibes;
       trip.group_type = chatData.group_type;
       trip.comfort_radius = chatData.comfort_radius;
-      const optimizedTrip = {
+      trip.comfort_radius_km = chatData.comfort_radius_km;
+      trip.pace = activePace;
+      const maxStops = STOPS_PER_PACE[activePace] || 4;
+      const sanitizedTrip = {
         ...trip,
         days: (trip.days || []).map(day => ({
+          ...day,
+          stops: (day.stops || []).filter(isValidTouristStop).slice(0, maxStops)
+        }))
+      };
+
+      sanitizedTrip.days.forEach(day => {
+        if (!day.stops || day.stops.length === 0) {
+          day.stops = [{
+            name: `Explore ${trip.destination}`,
+            description: 'Free exploration day - discover local gems',
+            category: 'Leisure',
+            cost_usd: 0,
+            duration_minutes: 480,
+            lat: trip.center_lat,
+            lng: trip.center_lng,
+            pro_tip: 'Ask locals for hidden gems not on tourist maps',
+          }];
+        }
+      });
+
+      const optimizedTrip = {
+        ...sanitizedTrip,
+        days: (sanitizedTrip.days || []).map(day => ({
           ...day,
           stops: nearestNeighborSort((day.stops || []).slice(0, 4))
         }))
@@ -1961,6 +2129,7 @@ export default function App() {
       destLng:null,
       days:null,
       comfort_radius:'',
+      comfort_radius_km:null,
       vibes:[...(prefs.defaultVibes || [])],
       group_type:prefs.defaultGroup || '',
       budget_level:'',
@@ -1970,6 +2139,7 @@ export default function App() {
     setHistory([]); setQIdx(0); setItin(null); setWeather(null);
     setSugg([]); setError(null); setTextInput(''); setReadyBuild(false);
     setCustomBudget(''); setShowCustomBudget(false);
+    setCustomRadius(''); setShowCustomRadius(false);
     setActiveDay(1); setCompletedStops({}); setDrawer(null); setActiveStop(null);
     setTripSaved(false); setSaving(false); setUnsavedModal(false);
     showToast('↺ Trip reset');
@@ -2288,8 +2458,10 @@ export default function App() {
               <div key={i} className="fade-up" style={{
                 display:'flex', justifyContent:m.from==='user'?'flex-end':'flex-start',
                 marginBottom:12,
+                alignItems:'flex-end',
+                gap:6,
               }}>
-                {m.from==='bot' && <div style={{ width:28, height:28, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, marginRight:8, flexShrink:0, alignSelf:'flex-end' }}>✈️</div>}
+                {m.from==='bot' && <div style={{ width:28, height:28, borderRadius:'50%', background:'#6366F1', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, flexShrink:0 }}>✈️</div>}
                 <div style={{
                   maxWidth:'78%', padding:'12px 16px', borderRadius:m.from==='user'?'18px 18px 4px 18px':'18px 18px 18px 4px',
                   background:m.from==='user'?'linear-gradient(135deg,#4F46E5,#6366F1)':'#1E293B',
@@ -2299,6 +2471,31 @@ export default function App() {
                 }}>
                   {m.text}
                 </div>
+                {m.from==='user' && !readyBuild && (
+                  <button
+                    onClick={() => editAnswer(i)}
+                    style={{
+                      background:'none',
+                      border:'1px solid #334155',
+                      color:'#475569', borderRadius:8,
+                      width:26, height:26, cursor:'pointer',
+                      fontSize:11, display:'flex',
+                      alignItems:'center', justifyContent:'center',
+                      flexShrink:0, transition:'all 0.2s',
+                    }}
+                    title="Edit this answer"
+                    onMouseEnter={e => {
+                      e.currentTarget.style.borderColor='#6366F1';
+                      e.currentTarget.style.color='#A5B4FC';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.borderColor='#334155';
+                      e.currentTarget.style.color='#475569';
+                    }}
+                  >
+                    ✏️
+                  </button>
+                )}
               </div>
             ))}
             {typing && (
@@ -2359,59 +2556,198 @@ export default function App() {
 
             {/* Q2 days */}
             {qIdx===2 && !readyBuild && (
-              <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-                {[3,5,7,10].map(d=>(
-                  <RippleBtn key={d} className={`chip${chatData.days===d?' on':''}`} onClick={()=>{
-                    setChatData(p=>({...p,days:d}));
-                    addMsg('user',`${d} days`);
-                    advanceQ(3);
-                  }}>{d} days</RippleBtn>
-                ))}
+              <div>
+                <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:12 }}>
+                  {[1,2,3,5,7,10,14].map(d => (
+                    <RippleBtn
+                      key={d}
+                      className={`chip${chatData.days===d?' on':''}`}
+                      onClick={() => {
+                        setChatData(p => ({...p, days:d}));
+                        addMsg('user', `${d} ${d===1?'day':'days'}`);
+                        advanceQ(3);
+                      }}
+                    >
+                      {d} {d===1?'day':'days'}
+                    </RippleBtn>
+                  ))}
+                </div>
+
+                {!showCustomDays ? (
+                  <button
+                    onClick={() => setShowCustomDays(true)}
+                    style={{
+                      background:'none', border:'1px dashed #334155',
+                      color:'#64748B', borderRadius:10, padding:'8px 16px',
+                      cursor:'pointer', fontSize:13, fontFamily:'inherit',
+                      width:'100%', transition:'all 0.2s',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.borderColor='#6366F1';
+                      e.currentTarget.style.color='#A5B4FC';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.borderColor='#334155';
+                      e.currentTarget.style.color='#64748B';
+                    }}
+                  >
+                    ✏️ Enter custom number of days
+                  </button>
+                ) : (
+                  <div style={{ display:'flex', gap:8, marginTop:4 }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={30}
+                      placeholder="How many days? (1-30)"
+                      value={customDaysInput}
+                      onChange={e => setCustomDaysInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') submitCustomDays();
+                      }}
+                      autoFocus
+                      style={{
+                        flex:1, background:'#1E293B',
+                        border:'1px solid #6366F1',
+                        borderRadius:10, padding:'10px 14px',
+                        color:'#F1F5F9', fontSize:14,
+                        fontFamily:'inherit',
+                      }}
+                    />
+                    <RippleBtn
+                      className="btn-primary"
+                      onClick={submitCustomDays}
+                      style={{ padding:'10px 18px', flexShrink:0 }}
+                    >
+                      Set
+                    </RippleBtn>
+                    <button
+                      onClick={() => {
+                        setShowCustomDays(false);
+                        setCustomDaysInput('');
+                      }}
+                      className="btn-secondary"
+                      style={{ padding:'10px 14px', flexShrink:0 }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
             {/* Q3 comfort radius */}
             {qIdx===3 && !readyBuild && (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                {radiusOptions.map((opt) => {
-                  const selected = chatData.comfort_radius === opt.value;
-                  return (
-                    <div
-                      key={opt.value}
-                      onClick={() => {
-                        setChatData(p => ({ ...p, comfort_radius: opt.value }));
-                        addMsg('user', `${opt.icon} ${opt.label} — ${opt.sub}`);
-                        advanceQ(4);
-                      }}
+              <div>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+                  {radiusOptions.map(opt => {
+                    const selected = chatData.comfort_radius === opt.value;
+                    return (
+                      <div
+                        key={opt.value}
+                        onClick={() => {
+                          setChatData(p => ({ ...p, comfort_radius:opt.value, comfort_radius_km:null }));
+                          addMsg('user', `${opt.icon} ${opt.label} (${opt.sub})`);
+                          advanceQ(4);
+                        }}
+                        style={{
+                          background: selected ? 'rgba(99,102,241,0.12)' : '#1E293B',
+                          border: `2px solid ${selected ? '#6366F1' : '#334155'}`,
+                          borderRadius:14, padding:'16px 12px',
+                          textAlign:'center', cursor:'pointer',
+                          transition:'all 0.2s',
+                        }}
+                        onMouseEnter={e => {
+                          if (!selected) {
+                            e.currentTarget.style.borderColor='#6366F1';
+                            e.currentTarget.style.background='rgba(99,102,241,0.06)';
+                          }
+                        }}
+                        onMouseLeave={e => {
+                          if (!selected) {
+                            e.currentTarget.style.borderColor='#334155';
+                            e.currentTarget.style.background='#1E293B';
+                          }
+                        }}
+                      >
+                        <div style={{ fontSize:28, marginBottom:6 }}>{opt.icon}</div>
+                        <div style={{ fontWeight:500, fontSize:14 }}>{opt.label}</div>
+                        <div style={{ color:'#6366F1', fontSize:12, fontWeight:500, marginTop:2 }}>
+                          {opt.sub}
+                        </div>
+                        <div style={{ color:'#475569', fontSize:10, marginTop:4, lineHeight:1.4 }}>
+                          {opt.desc}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ marginTop:10 }}>
+                  {!showCustomRadius ? (
+                    <button
+                      onClick={() => setShowCustomRadius(true)}
                       style={{
-                        background: selected ? 'rgba(99,102,241,0.12)' : '#1E293B',
-                        border: `2px solid ${selected ? '#6366F1' : '#334155'}`,
-                        borderRadius: 14,
-                        padding: '16px 12px',
-                        textAlign: 'center',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        transform: selected ? 'translateY(-1px)' : 'none',
+                        background:'none',
+                        border:'1px dashed #334155',
+                        color:'#64748B', borderRadius:10,
+                        padding:'8px 16px', cursor:'pointer',
+                        fontSize:13, fontFamily:'inherit',
+                        width:'100%', transition:'all 0.2s',
                       }}
-                      onMouseEnter={(e) => {
-                        if (!selected) {
-                          e.currentTarget.style.borderColor = '#6366F1';
-                          e.currentTarget.style.transform = 'translateY(-2px)';
-                        }
+                      onMouseEnter={e => {
+                        e.currentTarget.style.borderColor='#6366F1';
+                        e.currentTarget.style.color='#A5B4FC';
                       }}
-                      onMouseLeave={(e) => {
-                        if (!selected) {
-                          e.currentTarget.style.borderColor = '#334155';
-                          e.currentTarget.style.transform = 'none';
-                        }
+                      onMouseLeave={e => {
+                        e.currentTarget.style.borderColor='#334155';
+                        e.currentTarget.style.color='#64748B';
                       }}
                     >
-                      <div style={{ fontSize: 32, marginBottom: 8 }}>{opt.icon}</div>
-                      <div style={{ fontWeight: 600, fontSize: 14 }}>{opt.label}</div>
-                      <div style={{ color: '#64748B', fontSize: 12, marginTop: 4 }}>{opt.sub}</div>
+                      📏 Enter custom km radius
+                    </button>
+                  ) : (
+                    <div style={{ display:'flex', gap:8 }}>
+                      <div style={{ position:'relative', flex:1 }}>
+                        <input
+                          type="number"
+                          min={1}
+                          max={500}
+                          placeholder="Max km between stops (e.g. 15)"
+                          value={customRadius}
+                          onChange={e => setCustomRadius(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') submitCustomRadius();
+                          }}
+                          autoFocus
+                        />
+                        <span style={{
+                          position:'absolute', right:12, top:'50%',
+                          transform:'translateY(-50%)',
+                          color:'#64748B', fontSize:12,
+                          pointerEvents:'none',
+                        }}>km</span>
+                      </div>
+                      <RippleBtn
+                        className="btn-primary"
+                        onClick={submitCustomRadius}
+                        style={{ padding:'10px 16px', flexShrink:0 }}
+                      >
+                        Set
+                      </RippleBtn>
+                      <button
+                        onClick={() => {
+                          setShowCustomRadius(false);
+                          setCustomRadius('');
+                        }}
+                        className="btn-secondary"
+                        style={{ padding:'10px 12px', flexShrink:0 }}
+                      >
+                        ✕
+                      </button>
                     </div>
-                  );
-                })}
+                  )}
+                </div>
               </div>
             )}
 
@@ -2692,16 +3028,27 @@ export default function App() {
 
                 {/* Mood board pills */}
                 <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:12 }}>
-                  {[`✈️ ${itin.duration_days} Days`, `💰 Budget: ${SYM[activeCur]}${conv((itin?.daily_budget_usd || 8) * (itin?.duration_days || 1),activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || null) : null, budgetPillMap[itin.budget_level], `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
+                  {[`✈️ ${itin.duration_days} Days`, `💰 Budget: ${SYM[activeCur]}${conv((itin?.daily_budget_usd || 8) * (itin?.duration_days || 1),activeCur).toLocaleString()}`, `📍 ${itin.days?.reduce((a,d)=>a+(d.stops?.length||0),0)} stops`, ...(itin.vibes||[]).map(v=>`${CAT_EMOJI[v]||'🎯'} ${v}`), itin.comfort_radius ? ({ walkable:'🚶 Walkable', city:'🚗 City range', regional:'🛣️ Regional', flexible:'✈️ Flexible range' }[itin.comfort_radius] || (Number.isFinite(Number(itin?.comfort_radius_km)) ? `📏 ${Number(itin.comfort_radius_km)} km radius` : null)) : null, budgetPillMap[itin.budget_level], `${itin.group_type==='Solo'?'🧍':itin.group_type==='Couple'?'💑':itin.group_type==='Family'?'👨‍👩‍👧':'👫'} ${itin.group_type}`].filter(Boolean).map((pill,i) => (
                     <span key={i} style={{ background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.2)', color:'#A5B4FC', fontSize:11, padding:'4px 10px', borderRadius:20 }}>{pill}</span>
                   ))}
                 </div>
 
                 {/* Pace selector */}
                 <div style={{ display:'flex', gap:6, marginBottom:12 }}>
-                  {[['🐢','relaxed'],['⚡','balanced'],['🚀','fastpaced']].map(([e,p])=>(
-                    <RippleBtn key={p} className={`chip${activePace===p?' on':''}`} onClick={()=>setActivePace(p)} style={{ fontSize:12, padding:'6px 14px' }}>
-                      {e} {p}
+                  {[
+                    { key:'relaxed', e:'🐢', label:'Relaxed', stops:3 },
+                    { key:'balanced', e:'⚡', label:'Balanced', stops:4 },
+                    { key:'fastpaced', e:'🚀', label:'Fast-paced', stops:5 },
+                  ].map(p => (
+                    <RippleBtn key={p.key} className={`chip${activePace===p.key?' on':''}`} onClick={()=>setActivePace(p.key)} style={{ fontSize:12, padding:'6px 14px' }}>
+                      {p.e} {p.label}
+                      <span style={{
+                        fontSize:10,
+                        color: activePace===p.key ? 'rgba(255,255,255,0.7)' : '#475569',
+                        marginLeft:4,
+                      }}>
+                        {p.stops}/day
+                      </span>
                     </RippleBtn>
                   ))}
                   <div style={{ flex:1 }}/>
@@ -2847,7 +3194,29 @@ export default function App() {
 
                     {/* Route summary */}
                     <div style={{ background:'#1E293B', border:'1px solid #334155', borderRadius:12, padding:'14px 16px', marginBottom:16, fontSize:13 }}>
-                      <div style={{ fontWeight:500, marginBottom:10, color:'#94A3B8', fontSize:11, textTransform:'uppercase', letterSpacing:0.8 }}>📍 Today's Route</div>
+                      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+                        <div style={{ fontSize:11, color:'#64748B', textTransform:'uppercase', letterSpacing:0.8 }}>
+                          📍 Today's Route
+                        </div>
+                        <span style={{
+                          fontSize:11,
+                          background: activePace==='fastpaced'
+                            ? 'rgba(243,68,68,0.1)'
+                            : activePace==='relaxed'
+                              ? 'rgba(16,185,129,0.1)'
+                              : 'rgba(99,102,241,0.1)',
+                          color: activePace==='fastpaced'
+                            ? '#F87171'
+                            : activePace==='relaxed'
+                              ? '#10B981'
+                              : '#A5B4FC',
+                          padding:'3px 8px', borderRadius:20,
+                        }}>
+                          {activePace==='fastpaced' ? '🚀 5 stops'
+                            : activePace==='relaxed' ? '🐢 3 stops'
+                            : '⚡ 4 stops'}
+                        </span>
+                      </div>
                       {rerankedStops.map((s,i)=>(
                         <div key={i}>
                           <div style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 0' }}>
@@ -2886,8 +3255,26 @@ export default function App() {
                         return (
                           <div key={i}>
                             <div className={`stop-card${isActive?' active':''}`}
-                              style={{ marginLeft:8, borderLeft:`4px solid ${done?'#10B981':isActive?'#6366F1':DAY_COLORS[(activeDay-1)%DAY_COLORS.length]}`, opacity:done?0.65:1 }}
+                              style={{ position:'relative', marginLeft:8, borderLeft:`4px solid ${done?'#10B981':isActive?'#6366F1':DAY_COLORS[(activeDay-1)%DAY_COLORS.length]}`, opacity:done?0.65:1 }}
                               onClick={()=>{ setActiveStop(key); setDrawer(stop); if(mapRef.current&&stop.lat&&stop.lng) mapRef.current.flyTo([stop.lat,stop.lng],15); }}>
+
+                              {stop.tourist_score && (
+                                <div style={{
+                                  position:'absolute', top:8, left:8,
+                                  background: stop.tourist_score >= 80
+                                    ? 'rgba(245,158,11,0.9)'
+                                    : stop.tourist_score >= 60
+                                      ? 'rgba(16,185,129,0.9)'
+                                      : 'rgba(99,102,241,0.9)',
+                                  color:'white', fontSize:9,
+                                  padding:'2px 7px', borderRadius:20,
+                                  fontWeight:700,
+                                }}>
+                                  {stop.tourist_score >= 80 ? '⭐ ICONIC'
+                                    : stop.tourist_score >= 60 ? '✓ TOP PICK'
+                                    : '📍 GOOD'}
+                                </div>
+                              )}
 
                               <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:6, gap:8 }}>
                                 <div style={{ display:'flex', alignItems:'center', gap:8 }}>
@@ -2969,7 +3356,7 @@ export default function App() {
                                     </button>
                                   ))}
                                   {(() => {
-                                    const maxKm = RADIUS_KM[itin?.comfort_radius || 'flexible'];
+                                    const maxKm = resolveComfortRadiusKm(itin?.comfort_radius || 'flexible', itin?.comfort_radius_km);
                                     const isOverRadius = Number(stop?._distFromPrev) > maxKm;
                                     return isOverRadius ? (
                                       <span style={{ display:'inline-block', marginLeft:8, background:'rgba(245,158,11,0.12)', border:'1px solid rgba(245,158,11,0.45)', color:'#FCD34D', borderRadius:8, padding:'2px 8px', fontSize:10 }}>

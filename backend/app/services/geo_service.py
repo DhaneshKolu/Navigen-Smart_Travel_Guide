@@ -39,15 +39,15 @@ class GeoService:
 
         return float(data[0]["lat"]), float(data[0]["lon"])
 
-    async def search_nearby(self, lat: float, lon: float):
+    async def search_nearby(self, lat: float, lon: float, radius_m: int = 5000):
         query = f"""
         [out:json];
         (
-        node["tourism"](around:5000,{lat},{lon});
-        node["historic"](around:5000,{lat},{lon});
-        node["leisure"="park"](around:5000,{lat},{lon});
-        node["amenity"="restaurant"](around:5000,{lat},{lon});
-        node["amenity"="cafe"](around:5000,{lat},{lon});
+        node["tourism"](around:{radius_m},{lat},{lon});
+        node["historic"](around:{radius_m},{lat},{lon});
+        node["leisure"="park"](around:{radius_m},{lat},{lon});
+        node["amenity"="restaurant"](around:{radius_m},{lat},{lon});
+        node["amenity"="cafe"](around:{radius_m},{lat},{lon});
         );
         out;
         """
