@@ -296,7 +296,5 @@ Minimum deployment checklist:
 3. Run backend and frontend checks
 4. Open a pull request with summary and test notes
 
-## License
 
-Add your preferred license in a LICENSE file if needed.
 
