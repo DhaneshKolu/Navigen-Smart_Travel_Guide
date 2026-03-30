@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     GEOAPIFY_DEFAULT_RADIUS_METERS: int = 5000
     
     GOOGLE_PLACES_API_KEY: str = ""
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,https://navigen-smart-travel-guide-1.onrender.com"
+    # ALLOWED_ORIGINS can be set via environment variable
+    # Format: comma-separated URLs (e.g., "http://localhost:3000,https://example.com")
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
     
     model_config = SettingsConfigDict(
         env_file=".env",
