@@ -40,7 +40,7 @@ services:
         destination: /index.html
     envVars:
       - key: REACT_APP_API_URL
-        sync: false
+        value: https://smart-travel-backend.onrender.com
 
 databases:
   - name: smart-travel-db
