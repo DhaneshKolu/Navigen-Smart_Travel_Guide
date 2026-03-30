@@ -1,5 +1,3 @@
-import os
-
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from app.api.health import router as health_router
@@ -25,11 +23,15 @@ Base.metadata.create_all(bind=engine)
 
 
 app = FastAPI(title="NAVIGEN - Smart Travel Guide")
+
+# Parse ALLOWED_ORIGINS from settings (can be overridden via environment variable)
 ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    for origin in settings.ALLOWED_ORIGINS.split(",")
     if origin.strip()
 ]
+
+print(f"✓ CORS Enabled for origins: {ALLOWED_ORIGINS}")
 
 app.add_middleware(
     CORSMiddleware,
