@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     GEOAPIFY_DEFAULT_RADIUS_METERS: int = 5000
     
     GOOGLE_PLACES_API_KEY: str = ""
-    ALLOWED_ORIGINS: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,https://smart-travel-frontend.onrender.com"
     
     model_config = SettingsConfigDict(
         env_file=".env",
