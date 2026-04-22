@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
+import os
 from fastapi import FastAPI
+from fastapi import Response
 from app.api.health import router as health_router
 from app.db.engine import engine
 from app.db.base import Base
@@ -24,12 +26,25 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="NAVIGEN - Smart Travel Guide")
 
-# Parse ALLOWED_ORIGINS from settings (can be overridden via environment variable)
-ALLOWED_ORIGINS = [
+# Parse CORS origins from settings plus FRONTEND_URL and required Render domains.
+_origins_from_settings = [
     origin.strip()
     for origin in settings.ALLOWED_ORIGINS.split(",")
     if origin.strip()
 ]
+
+_frontend_url = os.getenv("FRONTEND_URL", "").strip()
+
+ALLOWED_ORIGINS = list(
+    dict.fromkeys(
+        [
+            *_origins_from_settings,
+            "https://navigen-smart-travel-guide.onrender.com",
+            "https://navigen-smart-travel-guide-1.onrender.com",
+            *([_frontend_url] if _frontend_url else []),
+        ]
+    )
+)
 
 print(f"✓ CORS Enabled for origins: {ALLOWED_ORIGINS}")
 
@@ -49,9 +64,11 @@ app.include_router(weather_router)
 app.include_router(itinerary_router)
 app.include_router(plan_api_router)
 app.include_router(user_api_router)
-@app.options("/{rest_of_path:path}")
-async def preflight_handler():
-    return {}
+
+
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
+    return Response(status_code=204)
 
 
 
