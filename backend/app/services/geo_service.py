@@ -56,7 +56,8 @@ class GeoService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     self.OVERPASS_URL,
-                    data={"data": query}
+                    data={"data": query},
+                    headers={"User-Agent": "smart-travel-guide/1.0"}
                 )
                 response.raise_for_status()
         except httpx.TimeoutException:
