@@ -1447,7 +1447,13 @@ async def create_plan(
     request.food_max_usd = FOOD_CAPS[level]["max_usd"]
     request.stop_max_usd = STOP_CAPS[level]["max_usd"]
 
-    result = await _build_dynamic_plan(request)
+    try:
+        result = await _build_dynamic_plan(request)
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Plan generation failed due to external service error: {str(e)}"
+        )
     result["trip"] = validate_and_fix_budget(result.get("trip", {}), request.budget_level)
 
     trip = Trip(
