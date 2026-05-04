@@ -2,7 +2,6 @@ import React, { useMemo, useState, useEffect } from "react";
 import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
 import polyline from "@mapbox/polyline";
 import "leaflet/dist/leaflet.css";
-
 function collectRouteSegments(routes) {
   if (!routes || typeof routes !== "object") {
     return [];
